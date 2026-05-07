@@ -3,5 +3,6 @@
   "git.path": "/usr/bin/git",
   "git.autoRepositoryDetection": true,
   "typescript.tsdk": "node_modules/typescript/lib",
-  "json.validation.enable": false
+  "json.validation.enable": false,
+  "css.lint.unknownAtRules": "ignore"
 }
