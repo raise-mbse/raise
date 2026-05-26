@@ -36,6 +36,9 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install SBOM Tool (cargo-cyclonedx)
+        run: cargo install cargo-cyclonedx
+
       # Étape 1 : Quality Gate (Lint, Format, Test)
       - name: Run Quality Gate
         run: make check

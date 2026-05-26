@@ -14,8 +14,4 @@ anyhow.workspace = true
 wasmtime.workspace = true
 
 
-
-# 3. Serveur réseau ultra-léger et asynchrone (Pour les Pi 3)
-tokio = { version = "1.40", features = ["full"] }
-axum = "0.8.9"
-openssl = { version = "0.10", features = ["vendored"] }
+ 

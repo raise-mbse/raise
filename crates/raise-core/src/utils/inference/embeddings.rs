@@ -19,21 +19,56 @@ pub struct TextEmbedder {
 impl TextEmbedder {
     /// Initialise le moteur de vectorisation de manière sécurisée.
     pub fn new() -> RaiseResult<Self> {
-        // Configuration d'un modèle léger et ultra-rapide
-        let opts = fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15);
+        let config = AppConfig::get();
+        let base_embeddings_dir = config.resolve_asset_path(
+            config
+                .system_assets
+                .ai_assets_paths
+                .as_ref()
+                .and_then(|p| p.embeddings.as_ref()),
+            "ai-assets/embeddings",
+        )?;
+        let cache_dir = base_embeddings_dir.join("bge-small");
 
-        match fastembed::TextEmbedding::try_new(opts) {
+        // Petite fonction utilitaire pour charger un fichier en RAM avec gestion d'erreur stricte
+        let load_file = |name: &str| -> RaiseResult<Vec<u8>> {
+            match std::fs::read(cache_dir.join(name)) {
+                Ok(data) => Ok(data),
+                Err(e) => raise_error!(
+                    "ERR_AI_FASTEMBED_MISSING_FILE",
+                    error = e.to_string(),
+                    context = json_value!({ "file": name, "path": cache_dir.to_string_lossy() })
+                ),
+            }
+        };
+
+        // 🎯 2. Injection manuelle des fichiers
+        let custom_model = fastembed::UserDefinedEmbeddingModel {
+            onnx_file: load_file("model.onnx")?,
+            tokenizer_files: fastembed::TokenizerFiles {
+                tokenizer_file: load_file("tokenizer.json")?,
+                config_file: load_file("config.json")?,
+                special_tokens_map_file: load_file("special_tokens_map.json")?,
+                tokenizer_config_file: load_file("tokenizer_config.json")?,
+            },
+            // 🎯 MÉTADONNÉES D'INFÉRENCE STRICTES (Spécifiques à BGE-Small)
+            pooling: Some(fastembed::Pooling::Cls), // BGE-Small extrait le contexte via le token [CLS]
+            external_initializers: vec![],          // Pas de poids séparés pour ce modèle
+            output_key: None,                       // Utilisation du nœud de sortie ONNX par défaut
+            quantization: Default::default(),       // Pas de quantification forcée
+        };
+
+        // 🎯 3. Initialisation "Zéro Réseau"
+        match fastembed::TextEmbedding::try_new_from_user_defined(custom_model, Default::default())
+        {
             Ok(inner) => Ok(Self { inner }),
             Err(e) => {
-                // Fail-Fast propre : on capture l'erreur si le modèle n'a pas
-                // pu être chargé (ex: pas d'espace disque, erreur réseau au 1er lancement).
                 raise_error!(
                     "ERR_INFERENCE_EMBEDDER_INIT",
-                    error = e,
+                    error = e.to_string(),
                     context = json_value!({
-                        "model": DEFAULT_EMBED_MODEL,
-                        "action": "init_fastembed",
-                        "hint": "Vérifiez l'espace disque pour le modèle d'embeddings."
+                        "action": "init_user_defined_fastembed",
+                        "mode": "absolute_air_gap"
                     })
                 );
             }
@@ -73,6 +108,7 @@ mod tests {
     #[serial_test::serial]
     #[cfg_attr(not(feature = "cuda"), ignore)]
     fn test_embedder_initialization() {
+        let _ = crate::utils::data::config::AppConfig::init();
         // Vérifie que le constructeur ne panique pas et charge bien le modèle
         let result = TextEmbedder::new();
         assert!(
@@ -86,6 +122,7 @@ mod tests {
     #[serial_test::serial]
     #[cfg_attr(not(feature = "cuda"), ignore)]
     fn test_single_embedding_dimension() {
+        let _ = crate::utils::data::config::AppConfig::init();
         let mut embedder = TextEmbedder::new().expect("Le modèle devrait s'initialiser");
         let texts = vec!["L'architecture RAISE garantit le Zéro Dette."];
 
@@ -108,6 +145,7 @@ mod tests {
     #[serial_test::serial]
     #[cfg_attr(not(feature = "cuda"), ignore)]
     fn test_batch_embeddings_processing() {
+        let _ = crate::utils::data::config::AppConfig::init();
         let mut embedder = TextEmbedder::new().expect("Le modèle devrait s'initialiser");
 
         let texts = vec![

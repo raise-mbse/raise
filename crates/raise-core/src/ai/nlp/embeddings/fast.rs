@@ -1,10 +1,13 @@
 // FICHIER : src-tauri/src/ai/nlp/embeddings/fast.rs
 
 use crate::json_db::collections::manager::CollectionsManager;
-use crate::utils::prelude::*; // 🎯 Façade Unique
+use crate::utils::inference::embeddings::TextEmbedder;
+use crate::utils::prelude::*; // 🎯 Façade Unique // 🎯 Injection de NOTRE façade noyau
 
 pub struct FastEmbedEngine {
-    model: LightweightTextEmbedding,
+    // 🎯 ZÉRO DETTE : On ne manipule plus la librairie tierce ici.
+    // On s'appuie exclusivement sur la forteresse que vous avez bâtie.
+    embedder: TextEmbedder,
 }
 
 impl FastEmbedEngine {
@@ -26,94 +29,43 @@ impl FastEmbedEngine {
             .and_then(|v| v.as_str())
             .unwrap_or("BGESmallENV15");
 
-        // 3. Déduction dynamique du modèle ONNX
-        let embed_model = match model_name_str {
-            "AllMiniLML6V2" => LightweightEmbeddingModel::AllMiniLML6V2,
-            _ => LightweightEmbeddingModel::BGESmallENV15,
-        };
-
-        // 4. 🎯 Rapatriement du cache FastEmbed dans le domaine RAISE (Zéro Dette)
-        let config = AppConfig::get();
-        let raise_domain_path = config
-            .get_path("PATH_RAISE_DOMAIN")
-            .unwrap_or_else(|| PathBuf::from("./raise_domain"));
-
-        let isolated_cache_dir = raise_domain_path
-            .join("_system")
-            .join("ai-assets")
-            .join("embeddings")
-            .join("fastembed");
-
-        // On s'assure que le dossier existe via la façade I/O
-        if let Err(e) = fs::ensure_dir_sync(&isolated_cache_dir) {
-            raise_error!("ERR_AI_FASTEMBED_CACHE", error = e.to_string());
-        }
-
-        // 5. Paramétrage avec l'isolation du cache
-        let options = LightweightInitOptions::new(embed_model)
-            .with_show_download_progress(true)
-            .with_cache_dir(isolated_cache_dir); // 🎯 L'isolation est garantie ici
-
-        // 6. Initialisation sécurisée via Match
-        let model = match LightweightTextEmbedding::try_new(options) {
-            Ok(m) => m,
-            Err(e) => raise_error!(
-                "ERR_AI_FASTEMBED_INIT",
-                error = e.to_string(),
-                context = json_value!({
-                    "provider": "FastEmbed",
-                    "model": model_name_str
-                })
-            ),
-        };
+        // 3. 🎯 DÉLÉGATION TOTALE : Initialisation "Air-Gap" via le Noyau
+        // Plus de gestion de chemins ou de variables d'environnement ici !
+        let embedder = TextEmbedder::new()?;
 
         user_info!(
             "MSG_NLP_FASTEMBED_READY",
-            json_value!({ "model": model_name_str, "status": "initialized" })
+            json_value!({ "model": model_name_str, "status": "initialized_via_core_facade" })
         );
 
-        Ok(Self { model })
+        Ok(Self { embedder })
     }
 
     /// Vectorise un lot de textes (Batch Inference) pour optimiser le débit.
     pub fn embed_batch(&mut self, texts: Vec<String>) -> RaiseResult<Vec<Vec<f32>>> {
-        let batch_size = texts.len();
-        if batch_size == 0 {
+        if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        match self.model.embed(texts, None) {
-            Ok(embeddings) => Ok(embeddings),
-            Err(e) => raise_error!(
-                "ERR_AI_EMBEDDINGS_BATCH_FAILED",
-                error = e.to_string(),
-                context = json_value!({
-                    "batch_size": batch_size,
-                    "provider": "FastEmbed"
-                })
-            ),
-        }
+        // Adaptation du type (Vec<String> -> Vec<&str>) attendu par la façade noyau
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+
+        // 🎯 Délégation directe
+        self.embedder.embed_batch(text_refs)
     }
 
     /// Vectorise une requête unique.
     pub fn embed_query(&mut self, text: &str) -> RaiseResult<Vec<f32>> {
-        let embeddings = match self.model.embed(vec![text.to_string()], None) {
-            Ok(e) => e,
-            Err(e) => raise_error!(
-                "ERR_AI_EMBEDDING_QUERY_FAILED",
-                error = e.to_string(),
-                context = json_value!({ "text_len": text.len(), "provider": "FastEmbed" })
-            ),
-        };
+        // 🎯 On réutilise la puissance du batch de la façade noyau pour une seule phrase
+        let mut embeddings = self.embedder.embed_batch(vec![text])?;
 
-        // 🎯 Rigueur : Extraction sécurisée du premier vecteur
-        let mut iter = embeddings.into_iter();
-        match iter.next() {
+        // Extraction sécurisée du vecteur
+        match embeddings.pop() {
             Some(vector) => Ok(vector),
             None => raise_error!(
                 "ERR_AI_EMBEDDING_EMPTY_RESULT",
                 error = "Le moteur n'a retourné aucun vecteur.",
-                context = json_value!({ "text_len": text.len() })
+                context = json_value!({ "text_len": text.len(), "provider": "FastEmbed_Core" })
             ),
         }
     }
@@ -125,6 +77,7 @@ impl FastEmbedEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::io::os::execute_native_inference;
     use crate::utils::testing::AgentDbSandbox;
 
     /// Test existant : Inférence simple
@@ -134,7 +87,6 @@ mod tests {
         let sandbox = AgentDbSandbox::new().await?;
         let config = AppConfig::get();
 
-        // 🎯 FIX MOUNT POINTS : Utilisation du domaine système configuré
         let manager = CollectionsManager::new(
             &sandbox.db,
             &config.mount_points.system.domain,
@@ -172,7 +124,8 @@ mod tests {
             "Phrase 3".to_string(),
         ];
 
-        let batch_res = engine.embed_batch(inputs)?;
+        let batch_res = execute_native_inference(move || engine.embed_batch(inputs)).await?;
+
         assert_eq!(batch_res.len(), 3);
         assert_eq!(batch_res[0].len(), 384);
         Ok(())
@@ -183,10 +136,8 @@ mod tests {
     #[serial_test::serial]
     async fn test_fast_embed_resilience_empty_config() -> RaiseResult<()> {
         let sandbox = AgentDbSandbox::new().await?;
-        // Manager pointant sur un domaine vierge
         let manager = CollectionsManager::new(&sandbox.db, "void", "void");
 
-        // L'initialisation doit réussir en utilisant les valeurs par défaut (BGESmallENV15)
         let engine_res = FastEmbedEngine::new(&manager).await;
         assert!(
             engine_res.is_ok(),

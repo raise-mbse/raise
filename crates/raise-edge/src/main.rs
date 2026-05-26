@@ -1,18 +1,21 @@
-use axum::{routing::get, Router};
+// FICHIER : crates/raise-edge/src/main.rs
 
-#[tokio::main]
-async fn main() {
-    println!("🚀 R.A.I.S.E. Edge Node - Démarrage de l'agent...");
+// Importations strictes et exclusives depuis la façade réseau du noyau
+use raise_core::utils::core::error::RaiseResult;
+use raise_core::utils::io::os::run_edge_node;
+use raise_core::utils::network::server::{get, new_http_router, start_network_api_async};
 
-    // Définition des routes réseau de base pour l'agent
-    let app = Router::new().route(
-        "/health",
-        get(|| async { "Agent Edge Online et Opérationnel" }),
-    );
+fn main() -> RaiseResult<()> {
+    println!("⚙️ Démarrage du moteur R.A.I.S.E...");
 
-    // Écoute sur toutes les interfaces réseau (0.0.0.0)
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("📡 En écoute sur {}", listener.local_addr().unwrap());
+    // On délègue toute la mécanique asynchrone au noyau
+    run_edge_node(async {
+        println!("🚀 Agent Edge Online !");
 
-    axum::serve(listener, app).await.unwrap();
+        let app = new_http_router().route("/health", get(|| async { "Système Opérationnel\n" }));
+
+        start_network_api_async("0.0.0.0", 3000, app).await?;
+
+        Ok(())
+    })
 }

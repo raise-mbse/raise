@@ -103,6 +103,24 @@ pub async fn exec_command_async(
     }
 }
 
+/// Lance l'application asynchrone en gardant le contrôle strict sur le CPU.
+pub fn run_edge_node<F>(app: F) -> RaiseResult<()>
+where
+    F: std::future::Future<Output = RaiseResult<()>>,
+{
+    // Construction manuelle du moteur Tokio
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        // STRATÉGIE EDGE : On limite Tokio à 2 threads réseau/I/O
+        // pour sanctuariser les autres cœurs du Pi 5 pour Candle et la logique Rust
+        .worker_threads(2)
+        .build()
+        .unwrap();
+
+    // On bloque le thread principal pour faire tourner le futur asynchrone
+    rt.block_on(app)
+}
+
 /// Exécute une tâche d'inférence ou de calcul intensif (CPU/GPU) sur un thread dédié.
 /// 🎯 ZÉRO DETTE : Isole le runtime Tokio des opérations bloquantes pour éviter le gel de l'UI.
 #[instrument(skip(task))]

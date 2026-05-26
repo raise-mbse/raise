@@ -1,21 +1,42 @@
-# --- CONFIGURATION OPTIMISÉE POUR CONDORCET (RYZEN 9) ---
+# FICHIER : .cargo/config.toml
 
+# ==============================================================================
+# CONFIGURATION GÉNÉRALE DU BUILD & ENVIRONNEMENT
+# ==============================================================================
 [env]
-# On supprime la limite de threads pour les tests.
-# Le Ryzen 9 peut gérer des centaines de tests en parallèle.
-# RUST_TEST_THREADS = "1"  <-- SUPPRIMÉ (Laisser par défaut)
+# Indispensable pour les tests impliquant ONNX Runtime et les accès base de données.
+# Empêche le "Thread Thrashing" et les collisions d'I/O sur le système de fichiers.
+#RUST_TEST_THREADS = "1"
 
 [build]
-# On laisse Cargo utiliser tous les cœurs (Auto-détection = 32 threads)
-# jobs = 1  <-- SUPPRIMÉ (C'était le frein à main !)
+# Par défaut, Cargo utilise la totalité des cœurs logiques disponibles.
+# (Ex: 32 threads d'exécution sur votre station Ryzen 9).
 
-# Optionnel : Pour compiler encore plus vite en mode debug
-#rustflags = ["-C", "target-cpu=native"]
-
+# ==============================================================================
+# CONFIGURATION 1 : STATION DE TRAVAIL LOCALE UBUNTU (x86_64)
+# ==============================================================================
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
-# Utilisation de Mold (indispensable) + Instructions CPU natives
-rustflags = ["-C", "link-arg=-fuse-ld=mold", "-C", "target-cpu=native"]
+# - target-cpu=native : Exploite toutes les instructions spécifiques du Ryzen 9.
+# - fuse-ld=mold      : Utilise le linker Mold pour des liaisons quasi instantanées.
+rustflags = [
+    "-C", "link-arg=-fuse-ld=mold",
+    "-C", "target-cpu=native"
+]
 
-# Si jamais Mold n'est pas installé, commentez la ligne au-dessus et décommentez celle-ci :
-# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+# ==============================================================================
+# CONFIGURATION 2 : NŒUDS EDGE EN EMBARQUÉ (aarch64)
+# Note : Le Pi 5 et le Pi 3B+ (64-bit) partagent ce triplet de compilation.
+# Décommentez la ligne correspondant au matériel ciblé avant de lancer 'cross'.
+# ==============================================================================
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+    # 🚀 OPTION A : PRESET RASPBERRY PI 5 (Cœur de cible Edge)
+    # Optimisé pour le processeur Cortex-A76 et les extensions vectorielles Neon avancées.
+    #"-C", "target-cpu=cortex-a76"
+
+    # 🐢 OPTION B : PRESET RASPBERRY PI 3B+ (Banc d'essai contraint)
+    # Décommentez les deux lignes ci-dessous (et commentez l'Option A) pour compiler pour le Pi 3B+.
+    "-C", "target-cpu=cortex-a53",
+    "-C", "panic=abort" # Recommandé pour économiser de la RAM sur le modèle 1 Go
+]

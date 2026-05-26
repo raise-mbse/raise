@@ -10,7 +10,7 @@ edition.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
-quick-xml = { version = "0.39.0", features = ["serialize"] }
+quick-xml = { version = "0.40.1", features = ["serialize"] }
 serde_yaml = "0.9"
 
 # --- Validation & Traitement ---
@@ -19,7 +19,7 @@ pest = "2.7"
 pest_derive = "2.7"
 
 # --- Asynchrone & Runtime (Workspace) ---
-tokio = { version = "1.36", features = ["full"] }
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "process"] }
 tokio-stream = "0.1"
 async-trait = "0.1"
 lru = "0.18.0"
@@ -60,11 +60,14 @@ rand_core = "0.10.0" # Pour exposer le trait RngCore
 # RÉSEAU & SERVEUR LOCAL (Raise Network)
 # ==========================================
 reqwest = { version = "0.13.1", default-features = false, features = [
+    "rustls",
+    "webpki-roots",
     "json",
     "blocking",
     "multipart",
 ] }
 axum = { version = "0.8.8", features = ["json", "tokio"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
@@ -79,14 +82,18 @@ candle-transformers = "0.10.2"
 safetensors = "0.7.0"
 nvml-wrapper = "0.12.1"
 
-tokenizers = { version = "0.23.1", features = ["http"] }
-fastembed = "5.5.0"
+tokenizers = { version = "0.23.1" }
+fastembed = { version = "5.13.4", default-features = false, features = [
+    "hf-hub-rustls-tls",
+    "ort-download-binaries-rustls-tls"
+] }
+
 
 # --- LA CAPTATION AUDIO ---
-cpal = "0.17.2"
-rubato = "3.0.0"
-audioadapter = "3.0.0"
-ringbuf = "0.5.0"
+cpal = { version = "0.17.2", optional = true }
+rubato = { version = "3.0.0", optional = true }
+audioadapter = { version = "3.0.0", optional = true }
+ringbuf = { version = "0.5.0", optional = true }
 
 # --- BASE DE DONNÉES & QUERY ---
 sqlparser = { version = "0.62.0", features = ["serde"] }
@@ -124,3 +131,12 @@ cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
 metal = ["candle-core/metal", "candle-nn/metal"]
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
+audio = ["dep:cpal", "dep:rubato", "dep:audioadapter", "dep:ringbuf"]
+
+# ==============================================================================
+# RÈGLES DE COMPILATION CROISÉE (Cible EDGE : ARM64)
+# ==============================================================================
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"] }
+
+
