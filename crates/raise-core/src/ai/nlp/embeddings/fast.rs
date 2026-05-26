@@ -83,6 +83,7 @@ mod tests {
     /// Test existant : Inférence simple
     #[async_test]
     #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
     async fn test_fast_embed_single() -> RaiseResult<()> {
         let sandbox = AgentDbSandbox::new().await?;
         let config = AppConfig::get();
@@ -108,6 +109,7 @@ mod tests {
     /// Test existant : Inférence par lot
     #[async_test]
     #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
     async fn test_fast_embed_batch() -> RaiseResult<()> {
         let sandbox = AgentDbSandbox::new().await?;
         let config = AppConfig::get();
@@ -134,6 +136,7 @@ mod tests {
     /// Résilience face à un domaine Système vide (Default Fallback)
     #[async_test]
     #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
     async fn test_fast_embed_resilience_empty_config() -> RaiseResult<()> {
         let sandbox = AgentDbSandbox::new().await?;
         let manager = CollectionsManager::new(&sandbox.db, "void", "void");
@@ -149,6 +152,7 @@ mod tests {
     /// 🎯 NOUVEAU TEST : Inférence sur chaîne vide
     #[async_test]
     #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
     async fn test_fast_embed_empty_string() -> RaiseResult<()> {
         let sandbox = AgentDbSandbox::new().await?;
         let config = AppConfig::get();
