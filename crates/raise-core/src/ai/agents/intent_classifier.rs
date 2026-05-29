@@ -1,6 +1,7 @@
 // FICHIER : src-tauri/src/ai/agents/intent_classifier.rs
 
 use crate::ai::llm::client::{LlmBackend, LlmClient};
+use crate::utils::data::json::Clearance;
 use crate::utils::prelude::*;
 
 // Import de la Toolbox pour le parsing JSON robuste
@@ -131,7 +132,12 @@ impl IntentClassifier {
             // 🎯 FIX : On trace l'erreur matérielle avant le fallback
             let response = match self
                 .llm
-                .ask(LlmBackend::LocalLlama, system_prompt, &user_prompt)
+                .ask(
+                    LlmBackend::LocalLlama,
+                    system_prompt,
+                    &user_prompt,
+                    Clearance::Internal,
+                )
                 .await
             {
                 Ok(res) => res,

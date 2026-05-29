@@ -1,5 +1,6 @@
 // FICHIER : crates/raise-core/src/lib.rs
 
+pub mod agents;
 pub mod ai;
 pub mod blockchain;
 pub mod code_generator;

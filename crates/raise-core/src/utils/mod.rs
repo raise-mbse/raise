@@ -43,7 +43,7 @@ pub use core::{LocalClock, LocalTimestamp, UniqueId, UtcClock, UtcTimestamp};
 // =========================================================================
 // On ne ré-exporte que les crate racines nécessaires aux macros ou au moteur.
 
+pub use tokio;
 pub use tracing;
-
 // Les macros #[macro_export] (raise_error!, json_value!, user_info!)
 // sont automatiquement rattachées à la racine de la crate.

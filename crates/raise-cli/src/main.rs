@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 mod commands;
 use raise_core::ai::agents::AgentContext;
 use raise_core::ai::assurance::health::RaiseHealthEngine;
-
 use raise_core::kernel::state::RaiseKernelState;
+use raise_core::utils::io::os::run_cli_app;
 use raise_core::{
     json_db::{
         collections::manager::CollectionsManager,
@@ -110,203 +110,205 @@ enum Commands {
     Utils(commands::utils::UtilsArgs),
 }
 
-#[tokio::main]
-async fn main() -> RaiseResult<()> {
-    // 1. INITIALISATION CONFIGURATION (CRITIQUE)
-    if let Err(e) = AppConfig::init() {
-        raise_error!(
-            "CLI_CRITICAL_INIT_FAILED",
-            error = e,
-            context = json_value!({"step": "AppConfig::init"})
-        );
-    }
-
-    // 2. INITIALISATION LOGGER ET LANGUE
-    context::init_logging();
-    let config = AppConfig::get();
-    if context::init_i18n(&config.core.language).await.is_err() {
-        eprintln!("⚠️ [BOOTSTRAP MODE] Traductions inaccessibles. Démarrage en mode sans échec.");
-    }
-
-    // 3. PARSING DU CLI
-    let cli = Cli::parse();
-
-    // 4. RÉSOLUTION SÉMANTIQUE DES PRIORITÉS (CLI > Config > Mount Points)
-    let active_user = match cli.user.clone() {
-        Some(u) => u,
-        None => match &config.user {
-            Some(u) => u.id.clone(),
-            None => "unknown_user".to_string(),
-        },
-    };
-
-    let active_domain = match cli.domain.clone() {
-        Some(d) => d,
-        None => match &config.user {
-            // Utilisation sécurisée des nouveaux points de montage
-            Some(u) => u.id.clone(), // Fallback sur ID utilisateur pour le domaine si non spécifié
-            None => config.mount_points.system.domain.clone(),
-        },
-    };
-
-    let active_db = match cli.db.clone() {
-        Some(db) => db,
-        None => config.mount_points.system.db.clone(),
-    };
-
-    // 5. INITIALISATION DU MOTEUR DE STOCKAGE
-    let db_root = match config.get_path("PATH_RAISE_DOMAIN") {
-        Some(path) => path,
-        None => raise_error!(
-            "CLI_MISSING_PATH",
-            error = "PATH_RAISE_DOMAIN introuvable dans la config"
-        ),
-    };
-
-    let storage = SharedRef::new(StorageEngine::new(JsonDbConfig::new(db_root))?);
-
-    // ---------------------------------------------------------
-    // 🧠 INITIALISATION SÉMANTIQUE (Bootstrapping In-Index)
-    // ---------------------------------------------------------
-
-    let system_mgr = CollectionsManager::new(
-        &storage,
-        &config.mount_points.system.domain,
-        &config.mount_points.system.db,
-    );
-
-    // Le CLI délègue tout au Core : WAL, Sémantique et Rules.
-    if let Err(e) = raise_core::bootstrap_core(&system_mgr).await {
-        user_error!(
-            "CLI_BOOTSTRAP_FAILED",
-            json_value!({"error": e.to_string(), "hint": "Échec de l'initialisation des moteurs Core."})
-        );
-        return Err(e);
-    }
-
-    let session_mgr = context::SessionManager::new(storage.clone());
-
-    // RÉSOLUTION DU CONTEXTE DE SIMULATION
-    let is_simulation = cli.simulate;
-    let sim_domain = cli.sim_domain.unwrap_or_else(|| "sim_mbse2".to_string());
-    let sim_db = cli.sim_db.unwrap_or_else(|| "sim_raise".to_string());
-
-    // =========================================================
-    // 🔍 PRE-FLIGHT CHECK : TRACAGE MÉMOIRE AVANT CHARGEMENT IA
-    // =========================================================
-    user_debug!(
-        "CLI_PRE_FLIGHT_START",
-        json_value!({"action": "check_vram"})
-    );
-
-    match RaiseHealthEngine::check_engine_health(&system_mgr).await {
-        Ok(report) => {
-            // Extraction sécurisée des valeurs pour le log
-            let vram_free = report
-                .diagnostic_details
-                .get("vram_free_mb")
-                .cloned()
-                .unwrap_or(JsonValue::Null);
-            let vram_req = report
-                .diagnostic_details
-                .get("vram_required_mb")
-                .cloned()
-                .unwrap_or(JsonValue::Null);
-
-            user_info!(
-                "CLI_HARDWARE_TRACE",
-                json_value!({
-                    "device_type": report.device_type,
-                    "vram_free_mb": vram_free,
-                    "vram_required_mb": vram_req,
-                    "acceleration": report.acceleration_active
-                })
+fn main() -> RaiseResult<()> {
+    run_cli_app(async {
+        // 1. INITIALISATION CONFIGURATION (CRITIQUE)
+        if let Err(e) = AppConfig::init() {
+            raise_error!(
+                "CLI_CRITICAL_INIT_FAILED",
+                error = e,
+                context = json_value!({"step": "AppConfig::init"})
             );
         }
-        Err(e) => {
-            user_warn!(
-                "CLI_HARDWARE_WARNING",
-                json_value!({
-                    "error": e.to_string(),
-                    "hint": "Mémoire insuffisante ou GPU inaccessible. L'Orchestrateur risque d'échouer."
-                })
+
+        // 2. INITIALISATION LOGGER ET LANGUE
+        context::init_logging();
+        let config = AppConfig::get();
+        if context::init_i18n(&config.core.language).await.is_err() {
+            eprintln!(
+                "⚠️ [BOOTSTRAP MODE] Traductions inaccessibles. Démarrage en mode sans échec."
             );
         }
-    }
 
-    // 🧠 INITIALISATION DE L'ORCHESTRATEUR IA
-    // On utilise le manager système pour résoudre les configurations des moteurs
-    let kernel_state = match raise_core::kernel::state::RaiseKernelState::boot(storage.clone())
-        .await
-    {
-        Ok(state) => state,
-        Err(e) => raise_error!(
-            "ERR_CLI_KERNEL_BOOT_FAILED",
-            error = e.to_string(),
-            context =
-                json_value!({"hint": "Échec critique lors du montage de la partition système."})
-        ),
-    };
+        // 3. PARSING DU CLI
+        let cli = Cli::parse();
 
-    // 6. CRÉATION DU CONTEXTE UNIFIÉ
-    let ctx = CliContext {
-        config,
-        session_mgr,
-        storage,
-        kernel: kernel_state,
-        active_user,
-        active_domain,
-        active_db,
-        is_test_mode: false,
-        is_simulation,
-        sim_domain,
-        sim_db,
-    };
+        // 4. RÉSOLUTION SÉMANTIQUE DES PRIORITÉS (CLI > Config > Mount Points)
+        let active_user = match cli.user.clone() {
+            Some(u) => u,
+            None => match &config.user {
+                Some(u) => u.id.clone(),
+                None => "unknown_user".to_string(),
+            },
+        };
 
-    // 7. AUTO-LOGIN AVEC L'UTILISATEUR RÉSOLU
-    if ctx.active_user == "unknown_user" {
-        user_warn!(
-            "CLI_GHOST_MODE",
-            json_value!({"hint": "Mode restreint (Setup)."})
+        let active_domain = match cli.domain.clone() {
+            Some(d) => d,
+            None => match &config.user {
+                // Utilisation sécurisée des nouveaux points de montage
+                Some(u) => u.id.clone(), // Fallback sur ID utilisateur pour le domaine si non spécifié
+                None => config.mount_points.system.domain.clone(),
+            },
+        };
+
+        let active_db = match cli.db.clone() {
+            Some(db) => db,
+            None => config.mount_points.system.db.clone(),
+        };
+
+        // 5. INITIALISATION DU MOTEUR DE STOCKAGE
+        let db_root = match config.get_path("PATH_RAISE_DOMAIN") {
+            Some(path) => path,
+            None => raise_error!(
+                "CLI_MISSING_PATH",
+                error = "PATH_RAISE_DOMAIN introuvable dans la config"
+            ),
+        };
+
+        let storage = SharedRef::new(StorageEngine::new(JsonDbConfig::new(db_root))?);
+
+        // ---------------------------------------------------------
+        // 🧠 INITIALISATION SÉMANTIQUE (Bootstrapping In-Index)
+        // ---------------------------------------------------------
+
+        let system_mgr = CollectionsManager::new(
+            &storage,
+            &config.mount_points.system.domain,
+            &config.mount_points.system.db,
         );
-    } else {
-        match ctx.session_mgr.start_session(&ctx.active_user).await {
-            Ok(_) => {
+
+        // Le CLI délègue tout au Core : WAL, Sémantique et Rules.
+        if let Err(e) = raise_core::bootstrap_core(&system_mgr).await {
+            user_error!(
+                "CLI_BOOTSTRAP_FAILED",
+                json_value!({"error": e.to_string(), "hint": "Échec de l'initialisation des moteurs Core."})
+            );
+            return Err(e);
+        }
+
+        let session_mgr = context::SessionManager::new(storage.clone());
+
+        // RÉSOLUTION DU CONTEXTE DE SIMULATION
+        let is_simulation = cli.simulate;
+        let sim_domain = cli.sim_domain.unwrap_or_else(|| "sim_mbse2".to_string());
+        let sim_db = cli.sim_db.unwrap_or_else(|| "sim_raise".to_string());
+
+        // =========================================================
+        // 🔍 PRE-FLIGHT CHECK : TRACAGE MÉMOIRE AVANT CHARGEMENT IA
+        // =========================================================
+        user_debug!(
+            "CLI_PRE_FLIGHT_START",
+            json_value!({"action": "check_vram"})
+        );
+
+        match RaiseHealthEngine::check_engine_health(&system_mgr).await {
+            Ok(report) => {
+                // Extraction sécurisée des valeurs pour le log
+                let vram_free = report
+                    .diagnostic_details
+                    .get("vram_free_mb")
+                    .cloned()
+                    .unwrap_or(JsonValue::Null);
+                let vram_req = report
+                    .diagnostic_details
+                    .get("vram_required_mb")
+                    .cloned()
+                    .unwrap_or(JsonValue::Null);
+
                 user_info!(
-                    "CLI_START_INITIALIZED",
+                    "CLI_HARDWARE_TRACE",
                     json_value!({
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "user": ctx.active_user,
-                        "domain": ctx.active_domain
+                        "device_type": report.device_type,
+                        "vram_free_mb": vram_free,
+                        "vram_required_mb": vram_req,
+                        "acceleration": report.acceleration_active
                     })
                 );
             }
             Err(e) => {
                 user_warn!(
-                    "CLI_SESSION_UNAVAILABLE",
-                    json_value!({"user": ctx.active_user, "error": e.to_string()})
+                    "CLI_HARDWARE_WARNING",
+                    json_value!({
+                        "error": e.to_string(),
+                        "hint": "Mémoire insuffisante ou GPU inaccessible. L'Orchestrateur risque d'échouer."
+                    })
                 );
             }
         }
-    }
 
-    // 8. DISPATCH DES COMMANDES
-    match cli.command {
-        Some(cmd) => match execute_command(cmd.clone(), ctx.clone()).await {
-            Ok(_) => (),
+        // 🧠 INITIALISATION DE L'ORCHESTRATEUR IA
+        // On utilise le manager système pour résoudre les configurations des moteurs
+        let kernel_state = match raise_core::kernel::state::RaiseKernelState::boot(storage.clone())
+            .await
+        {
+            Ok(state) => state,
             Err(e) => raise_error!(
-                "CLI_COMMAND_EXECUTION_FAILED",
-                error = e,
-                context = json_value!({"command": format!("{:?}", cmd)})
+                "ERR_CLI_KERNEL_BOOT_FAILED",
+                error = e.to_string(),
+                context = json_value!({"hint": "Échec critique lors du montage de la partition système."})
             ),
-        },
-        None => {
-            run_global_shell(ctx).await?;
-        }
-    }
+        };
 
-    user_debug!("CLI_EXECUTION_FINISHED");
-    Ok(())
+        // 6. CRÉATION DU CONTEXTE UNIFIÉ
+        let ctx = CliContext {
+            config,
+            session_mgr,
+            storage,
+            kernel: kernel_state,
+            active_user,
+            active_domain,
+            active_db,
+            is_test_mode: false,
+            is_simulation,
+            sim_domain,
+            sim_db,
+        };
+
+        // 7. AUTO-LOGIN AVEC L'UTILISATEUR RÉSOLU
+        if ctx.active_user == "unknown_user" {
+            user_warn!(
+                "CLI_GHOST_MODE",
+                json_value!({"hint": "Mode restreint (Setup)."})
+            );
+        } else {
+            match ctx.session_mgr.start_session(&ctx.active_user).await {
+                Ok(_) => {
+                    user_info!(
+                        "CLI_START_INITIALIZED",
+                        json_value!({
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "user": ctx.active_user,
+                            "domain": ctx.active_domain
+                        })
+                    );
+                }
+                Err(e) => {
+                    user_warn!(
+                        "CLI_SESSION_UNAVAILABLE",
+                        json_value!({"user": ctx.active_user, "error": e.to_string()})
+                    );
+                }
+            }
+        }
+
+        // 8. DISPATCH DES COMMANDES
+        match cli.command {
+            Some(cmd) => match execute_command(cmd.clone(), ctx.clone()).await {
+                Ok(_) => (),
+                Err(e) => raise_error!(
+                    "CLI_COMMAND_EXECUTION_FAILED",
+                    error = e,
+                    context = json_value!({"command": format!("{:?}", cmd)})
+                ),
+            },
+            None => {
+                run_global_shell(ctx).await?;
+            }
+        }
+
+        user_debug!("CLI_EXECUTION_FINISHED");
+        Ok(())
+    })
 }
 
 /// Boucle principale du Shell Global (REPL) avec résolution Mount Points

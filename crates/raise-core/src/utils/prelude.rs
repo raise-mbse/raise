@@ -9,6 +9,7 @@ pub use crate::utils::context::i18n::I18nString;
 pub use crate::utils::core::error::{anyhow, AnyResult, AppError, Context, RaiseResult};
 pub use crate::utils::core::{
     async_interface, // 🎯 Alias de async_trait::async_trait
+    async_main,
     async_recursive,
     async_test,
     is_same_reference,
@@ -75,7 +76,10 @@ pub use crate::utils::core::{
 
 // --- 2. I/O, FS & SYSTÈME ---
 pub use crate::utils::io::io_traits::{SyncBufRead, SyncRead, SyncSeek, SyncWrite};
-pub use crate::utils::io::os_types::{ProcessCommand, ProcessIoConfig, ProcessOutput};
+pub use crate::utils::io::os_types::{
+    os_temp_dir, ProcessChild, ProcessCommand, ProcessExitStatus, ProcessIoConfig, ProcessOutput,
+    UnixFilePermissions,
+};
 pub use crate::utils::io::{
     compress, decompress, fs, os, stderr_raw, stdin_raw, stdout_raw, tempdir, Path, PathBuf,
     TempDir,
@@ -83,6 +87,7 @@ pub use crate::utils::io::{
 
 // --- 3. DATA, JSON & COLLECTIONS ---
 pub use crate::utils::data::config::{AppConfig, CoreConfig};
+pub use crate::utils::data::encoding::{decode_base64, encode_base64};
 pub use crate::utils::data::json::{self, json_value, JsonObject, JsonValue};
 pub use crate::utils::data::{
     Deserializable,

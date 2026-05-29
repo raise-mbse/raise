@@ -1,8 +1,8 @@
 // FICHIER : src-tauri/src/utils/data/mod.rs
 
 pub mod config;
+pub mod encoding;
 pub mod json;
-
 // =========================================================================
 // FAÇADE `data` : Re-exports Sémantiques (AI-Ready)
 // =========================================================================

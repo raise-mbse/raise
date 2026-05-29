@@ -56,6 +56,9 @@ pub use async_recursion::async_recursion as async_recursive; // 🎯 L'ajout est
 /// 🤖 IA NOTE : Point d'entrée pour les tests unitaires asynchrones.
 pub use tokio::test as async_test;
 
+/// 🤖 IA NOTE : Point d'entrée pour les tests unitaires asynchrones.
+pub use tokio::main as async_main;
+
 // --- SYSTÈME DE FORMATAGE & DIAGNOSTIC (AI-Ready Alias) ---
 pub use std::fmt;
 

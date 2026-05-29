@@ -21,7 +21,7 @@ macro_rules! async_interface {
 macro_rules! user_info {
     ($key:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::info!(
+        $crate::utils::tracing::info!(
             target: "user_notification",
             event_id = $key,
             "{}", msg
@@ -29,7 +29,7 @@ macro_rules! user_info {
     }};
     ($key:expr, $context:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::info!(
+        $crate::utils::tracing::info!(
             target: "user_notification",
             event_id = $key,
             context = %$context,
@@ -43,7 +43,7 @@ macro_rules! user_info {
 macro_rules! user_trace {
     ($key:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::trace!(
+        $crate::utils::tracing::trace!(
             target: "user_notification",
             event_id = $key,
             severity = "trace",
@@ -52,7 +52,7 @@ macro_rules! user_trace {
     }};
     ($key:expr, $context:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::trace!(
+        $crate::utils::tracing::trace!(
             target: "user_notification",
             event_id = $key,
             severity = "trace",
@@ -67,7 +67,7 @@ macro_rules! user_trace {
 macro_rules! user_success {
     ($key:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::info!(
+        $crate::utils::tracing::info!(
             target: "user_notification",
             event_id = $key,
             severity = "success",
@@ -76,7 +76,7 @@ macro_rules! user_success {
     }};
     ($key:expr, $context:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::info!(
+        $crate::utils::tracing::info!(
             target: "user_notification",
             event_id = $key,
             severity = "success",
@@ -91,7 +91,7 @@ macro_rules! user_success {
 macro_rules! user_warn {
     ($key:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::warn!(
+        $crate::utils::tracing::warn!(
             target: "user_notification",
             event_id = $key,
             severity = "warning",
@@ -100,7 +100,7 @@ macro_rules! user_warn {
     }};
     ($key:expr, $context:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::warn!(
+        $crate::utils::tracing::warn!(
             target: "user_notification",
             event_id = $key,
             severity = "warning",
@@ -115,7 +115,7 @@ macro_rules! user_warn {
 macro_rules! user_debug {
     ($key:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::debug!(
+        $crate::utils::tracing::debug!(
             target: "user_notification",
             event_id = $key,
             severity = "debug",
@@ -124,7 +124,7 @@ macro_rules! user_debug {
     }};
     ($key:expr, $context:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::debug!(
+        $crate::utils::tracing::debug!(
             target: "user_notification",
             event_id = $key,
             severity = "debug",
@@ -138,7 +138,7 @@ macro_rules! user_debug {
 macro_rules! user_error {
     ($key:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::error!(
+        $crate::utils::tracing::error!(
             target: "user_notification",
             event_id = $key,
             severity = "error",
@@ -147,7 +147,7 @@ macro_rules! user_error {
     }};
     ($key:expr, $context:expr) => {{
         let msg = $crate::utils::context::i18n::t($key);
-        tracing::error!(
+        $crate::utils::tracing::error!(
             target: "user_notification",
             event_id = $key,
             severity = "error",
@@ -236,7 +236,7 @@ macro_rules! build_error {
         let final_context = $crate::utils::data::json::JsonValue::Object(ctx_map);
         let reason_msg = $crate::utils::context::i18n::t($key);
 
-        tracing::error!(
+        $crate::utils::tracing::error!(
             event = "user_error",
             key = $key,
             service = %service,

@@ -10,6 +10,7 @@ use tracing::instrument;
 
 // --- RE-EXPORTS (Isolation de la couche OS) ---
 pub use include_dir::{include_dir, Dir};
+pub use std::fs::{Metadata, Permissions};
 pub use std::path::{Component, Path, PathBuf};
 pub use tempfile::{tempdir, TempDir};
 pub use walkdir::WalkDir;
@@ -544,5 +545,69 @@ impl ProjectScope {
     pub fn write_sync(&self, relative_path: impl AsRef<Path>, content: &[u8]) -> RaiseResult<()> {
         let target = self.validate_path(relative_path.as_ref())?;
         write_atomic_sync(&target, content)
+    }
+}
+
+// =========================================================================
+// 7. MÉTADONNÉES & PERMISSIONS
+// =========================================================================
+
+#[instrument(skip(path), fields(path = ?path.as_ref()))]
+pub async fn metadata_async(path: impl AsRef<Path>) -> RaiseResult<Metadata> {
+    let p = path.as_ref();
+    match tokio::fs::metadata(p).await {
+        Ok(meta) => Ok(meta),
+        Err(e) => raise_error!(
+            "ERR_FS_METADATA_ASYNC",
+            error = e,
+            context = json_value!({ "path": p.to_string_lossy() })
+        ),
+    }
+}
+
+pub fn metadata_sync(path: impl AsRef<Path>) -> RaiseResult<Metadata> {
+    let p = path.as_ref();
+    match std::fs::metadata(p) {
+        Ok(meta) => Ok(meta),
+        Err(e) => raise_error!(
+            "ERR_FS_METADATA_SYNC",
+            error = e,
+            context = json_value!({ "path": p.to_string_lossy() })
+        ),
+    }
+}
+
+pub async fn get_permissions_async(path: impl AsRef<Path>) -> RaiseResult<Permissions> {
+    let meta = metadata_async(path).await?;
+    Ok(meta.permissions())
+}
+
+pub fn get_permissions_sync(path: impl AsRef<Path>) -> RaiseResult<Permissions> {
+    let meta = metadata_sync(path)?;
+    Ok(meta.permissions())
+}
+
+#[instrument(skip(path, perms), fields(path = ?path.as_ref()))]
+pub async fn set_permissions_async(path: impl AsRef<Path>, perms: Permissions) -> RaiseResult<()> {
+    let p = path.as_ref();
+    match tokio::fs::set_permissions(p, perms).await {
+        Ok(_) => Ok(()),
+        Err(e) => raise_error!(
+            "ERR_FS_SET_PERMISSIONS_ASYNC",
+            error = e,
+            context = json_value!({ "path": p.to_string_lossy() })
+        ),
+    }
+}
+
+pub fn set_permissions_sync(path: impl AsRef<Path>, perms: Permissions) -> RaiseResult<()> {
+    let p = path.as_ref();
+    match std::fs::set_permissions(p, perms) {
+        Ok(_) => Ok(()),
+        Err(e) => raise_error!(
+            "ERR_FS_SET_PERMISSIONS_SYNC",
+            error = e,
+            context = json_value!({ "path": p.to_string_lossy() })
+        ),
     }
 }

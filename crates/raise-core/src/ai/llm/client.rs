@@ -2,10 +2,11 @@
 
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::storage::StorageEngine;
+use crate::utils::data::json::Clearance;
 use crate::utils::prelude::*;
 use async_trait::async_trait;
 
-// 🎯 Import de vos fournisseurs Cloud
+// 🎯 Import des fournisseurs Cloud
 use crate::ai::llm::providers::{claude, gemini, mistral};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -13,8 +14,7 @@ pub enum LlmBackend {
     Mistral,
     Claude,
     Gemini,
-    Mock,
-    // Conservés pour la rétro-compatibilité
+    Mock, // Utilisé pour intercepter les appels dans les tests
     LocalLlama,
     GoogleGemini,
     LlamaCpp,
@@ -23,7 +23,6 @@ pub enum LlmBackend {
 
 #[async_trait]
 pub trait LlmEngine: Send + Sync {
-    // 🎯 On utilise &mut self car l'inférence modifie l'état interne du moteur
     async fn generate(
         &mut self,
         system: &str,
@@ -54,28 +53,70 @@ impl LlmClient {
         })
     }
 
+    /// Le "Gatekeeper" hybride : Route la requête en fonction de l'habilitation (Clearance).
     pub async fn ask(
         &self,
         backend: LlmBackend,
         system_prompt: &str,
         user_prompt: &str,
+        clearance: Clearance,
     ) -> RaiseResult<String> {
-        // =========================================================
-        // 1. PRIORITÉ ABSOLUE AU MOTEUR INJECTÉ (Local ou Mock)
-        // =========================================================
-        if let Some(engine_ref) = &self.native_engine {
-            let mut engine = engine_ref.lock().await;
-            // Si c'est un MockEngine, il répondra instantanément
-            return engine.generate(system_prompt, user_prompt, 1024).await;
+        // 1. DÉLÉGATION DIRECTE CLOUD (Données Publiques)
+        if clearance == Clearance::Public {
+            return self.call_cloud(backend, system_prompt, user_prompt).await;
         }
 
-        // =========================================================
-        // 2. FALLBACK EXCEPTIONNEL SUR LE CLOUD
-        // =========================================================
-        user_warn!(
-            "AI_LOCAL_UNAVAILABLE",
-            json_value!({"hint": "Bascule sur le réseau distant."})
-        );
+        // 2. EXÉCUTION LOCALE SOUVERAINE (Priorité pour tous les autres niveaux)
+        if let Some(engine_ref) = &self.native_engine {
+            let mut engine = engine_ref.lock().await;
+
+            match engine.generate(system_prompt, user_prompt, 1024).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    // Si l'exécution locale échoue, on vérifie si la loi/stratégie autorise la fuite Cloud
+                    if !clearance.is_cloud_authorized() {
+                        return Err(build_error!(
+                    "ERR_SECURITY_AIR_GAP",
+                    error = format!("Échec du moteur local ({}). Fallback Cloud interdit pour le niveau {:?}.", e, clearance)
+                ));
+                    }
+                }
+            }
+        } else if !clearance.is_cloud_authorized() {
+            // Aucun GPU/Moteur local disponible et interdiction stricte de sortir
+            return Err(build_error!(
+                "ERR_SECURITY_AIR_GAP",
+                error = format!(
+                    "Moteur local indisponible. Déploiement bloqué pour protéger la donnée ({:?}).",
+                    clearance
+                )
+            ));
+        }
+
+        // 3. FALLBACK CLOUD (Uniquement autorisé si is_cloud_authorized() est vrai)
+        if clearance.is_cloud_authorized() {
+            user_warn!(
+                "AI_LOCAL_UNAVAILABLE",
+                json_value!({"hint": format!("Bascule sur le réseau distant autorisée (Niveau: {:?}).", clearance)})
+            );
+            return self.call_cloud(backend, system_prompt, user_prompt).await;
+        }
+
+        unreachable!()
+    }
+
+    /// Wrapper interne pour l'appel aux API distantes
+    async fn call_cloud(
+        &self,
+        backend: LlmBackend,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> RaiseResult<String> {
+        // Interception pour les tests unitaires afin d'éviter les vrais appels réseau
+        if backend == LlmBackend::Mock {
+            return Ok("[CLOUD_MOCK_RESPONSE] Réponse générée par le réseau distant.".to_string());
+        }
+
         let manager = CollectionsManager::new(self.storage.as_ref(), &self.space, &self.db_name);
         match backend {
             LlmBackend::Claude => claude::ask(&manager, system_prompt, user_prompt).await,
@@ -84,18 +125,20 @@ impl LlmClient {
         }
     }
 
+    /// Méthode de commodité par défaut (Internal)
     pub async fn generate(&self, user_prompt: &str) -> RaiseResult<String> {
         self.ask(
             LlmBackend::Mistral,
             "Tu es un assistant IA expert et concis.",
             user_prompt,
+            Clearance::Internal,
         )
         .await
     }
 }
 
 // =========================================================================
-// TESTS UNITAIRES (Validation du Routage et du Gatekeeper)
+// TESTS UNITAIRES (Validation du Routage et du Gatekeeper de Sécurité)
 // =========================================================================
 
 #[cfg(test)]
@@ -170,7 +213,9 @@ mod tests {
 
         let client = LlmClient::new(&manager, sandbox.db.clone(), Some(mock_engine)).await?;
 
-        let result = client.ask(LlmBackend::Claude, "System", "User").await?;
+        let result = client
+            .ask(LlmBackend::Claude, "System", "User", Clearance::Internal)
+            .await?;
         assert!(result.contains(expected_msg));
         Ok(())
     }
@@ -189,9 +234,139 @@ mod tests {
 
         let client = LlmClient::new(&manager, sandbox.db.clone(), Some(mock_engine)).await?;
 
-        let result = client.ask(LlmBackend::Gemini, "System", "User").await?;
+        let result = client
+            .ask(LlmBackend::Gemini, "System", "User", Clearance::Internal)
+            .await?;
 
         assert!(result.contains(expected_msg));
+        Ok(())
+    }
+
+    /// TEST 1 : Donnée SECRÈTE avec ressource locale disponible -> SUCCÈS.
+    #[async_test]
+    #[serial_test::serial]
+    async fn test_clearance_secret_with_local() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let manager = CollectionsManager::new(&sandbox.db, "test", "db");
+
+        let expected_msg = "Résultat Confidentiel Local";
+        let mock_engine = SharedRef::new(AsyncMutex::new(MockLlmEngine {
+            response: expected_msg.to_string(),
+        }));
+
+        let client = LlmClient::new(&manager, sandbox.db.clone(), Some(mock_engine)).await?;
+
+        let result = client
+            .ask(LlmBackend::Mock, "System", "Prompt", Clearance::Secret)
+            .await?;
+        assert_eq!(
+            result, expected_msg,
+            "La requête SECRÈTE doit être traitée localement."
+        );
+        Ok(())
+    }
+
+    /// TEST 2 : Donnée SECRÈTE sans ressource locale -> ÉCHEC BLOQUANT (Maintien de l'Air-Gap).
+    #[async_test]
+    #[serial_test::serial]
+    async fn test_clearance_secret_without_local_blocks_airgap() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let manager = CollectionsManager::new(&sandbox.db, "test", "db");
+
+        // Aucun moteur local fourni (None)
+        let client = LlmClient::new(&manager, sandbox.db.clone(), None).await?;
+
+        let result = client
+            .ask(LlmBackend::Mock, "System", "Prompt", Clearance::Secret)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "La requête doit échouer pour protéger la donnée."
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ERR_SECURITY_AIR_GAP"),
+            "L'erreur doit mentionner la protection Air-Gap."
+        );
+        Ok(())
+    }
+
+    /// TEST 3.A : Donnée INTERNE sans ressource locale -> ÉCHEC BLOQUANT (Souveraineté).
+    #[async_test]
+    #[serial_test::serial]
+    async fn test_clearance_internal_without_local_blocks_airgap() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let manager = CollectionsManager::new(&sandbox.db, "test", "db");
+
+        // Aucun moteur local fourni (None)
+        let client = LlmClient::new(&manager, sandbox.db.clone(), None).await?;
+
+        // 🎯 C2-Interne n'est pas compatible Cloud Act, le système doit bloquer !
+        let result = client
+            .ask(LlmBackend::Mock, "System", "Prompt", Clearance::Internal)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "La requête C2-Interne doit échouer pour protéger la donnée de toute fuite Cloud."
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("ERR_SECURITY_AIR_GAP"));
+        Ok(())
+    }
+
+    /// TEST 3.B : Donnée CLOUD ACT sans ressource locale -> FALLBACK CLOUD RÉUSSI.
+    #[async_test]
+    #[serial_test::serial]
+    async fn test_clearance_cloud_act_triggers_fallback() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let manager = CollectionsManager::new(&sandbox.db, "test", "db");
+
+        // Aucun moteur local fourni (None)
+        let client = LlmClient::new(&manager, sandbox.db.clone(), None).await?;
+
+        // 🎯 C2-CA (InternalCloudAct) autorise le fallback
+        let result = client
+            .ask(
+                LlmBackend::Mock,
+                "System",
+                "Prompt",
+                Clearance::InternalCloudAct,
+            )
+            .await?;
+
+        assert!(
+            result.contains("[CLOUD_MOCK_RESPONSE]"),
+            "Le Gatekeeper doit basculer sur le cloud pour les données compatibles Cloud Act."
+        );
+        Ok(())
+    }
+
+    /// TEST 4 : Donnée PUBLIQUE -> CLOUD DIRECT (Bypass du moteur local même si disponible).
+    #[async_test]
+    #[serial_test::serial]
+    async fn test_clearance_public_bypasses_local() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let manager = CollectionsManager::new(&sandbox.db, "test", "db");
+
+        let local_msg = "Je suis le GPU Local";
+        let mock_engine = SharedRef::new(AsyncMutex::new(MockLlmEngine {
+            response: local_msg.to_string(),
+        }));
+
+        // Le moteur local EST disponible
+        let client = LlmClient::new(&manager, sandbox.db.clone(), Some(mock_engine)).await?;
+
+        let result = client
+            .ask(LlmBackend::Mock, "System", "Prompt", Clearance::Public)
+            .await?;
+
+        assert!(result.contains("[CLOUD_MOCK_RESPONSE]"), "Le Gatekeeper doit router directement vers le cloud, ignorant le GPU local pour économiser la VRAM.");
+        assert!(
+            !result.contains(local_msg),
+            "Le moteur local ne doit pas avoir été sollicité."
+        );
         Ok(())
     }
 }

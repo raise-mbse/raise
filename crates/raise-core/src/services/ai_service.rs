@@ -24,6 +24,7 @@ use crate::ai::training::dataset::{extract_domain_data, TrainingExample};
 use crate::ai::agents::prompt_engine::PromptEngine;
 use crate::ai::agents::tools::extract_json_from_llm;
 use crate::ai::llm::client::{LlmBackend, LlmClient, LlmEngine};
+use crate::utils::data::json::Clearance;
 
 /// 🎯 LOGIQUE CORE : Exécute un blueprint de prompt (Data-Driven).
 /// Respecte les points de montage système pour la résolution du client LLM.
@@ -47,7 +48,15 @@ pub async fn ai_execute_blueprint_core(
     let system_prompt = prompt_engine.compile(prompt_handle, vars.as_ref()).await?;
 
     // 3. Inférence LLM
-    let response = match client.ask(LlmBackend::LocalLlama, &system_prompt, "").await {
+    let response = match client
+        .ask(
+            LlmBackend::LocalLlama,
+            &system_prompt,
+            "",
+            Clearance::Internal,
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => raise_error!("ERR_LLM_INFERENCE_FAIL", error = e.to_string()),
     };

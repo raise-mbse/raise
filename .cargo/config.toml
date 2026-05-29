@@ -36,7 +36,6 @@ rustflags = [
     #"-C", "target-cpu=cortex-a76"
 
     # 🐢 OPTION B : PRESET RASPBERRY PI 3B+ (Banc d'essai contraint)
-    # Décommentez les deux lignes ci-dessous (et commentez l'Option A) pour compiler pour le Pi 3B+.
     "-C", "target-cpu=cortex-a53",
     "-C", "panic=abort" # Recommandé pour économiser de la RAM sur le modèle 1 Go
 ]

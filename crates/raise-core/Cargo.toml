@@ -84,7 +84,6 @@ nvml-wrapper = "0.12.1"
 
 tokenizers = { version = "0.23.1" }
 fastembed = { version = "5.13.4", default-features = false, features = [
-    "hf-hub-rustls-tls",
     "ort-download-binaries-rustls-tls"
 ] }
 

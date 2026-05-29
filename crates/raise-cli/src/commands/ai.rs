@@ -17,6 +17,7 @@ use raise_core::ai::training::ai_train_domain_native;
 use raise_core::ai::voice::stt::WhisperEngine;
 use raise_core::model_engine::types::ProjectModel;
 use raise_core::model_engine::types::{ArcadiaElement, NameType};
+use raise_core::utils::data::json::Clearance;
 use raise_core::utils::io::audio::AudioListener;
 
 use raise_core::ai::agents::prompt_engine::PromptEngine;
@@ -848,6 +849,7 @@ async fn run_execute_action(
             raise_core::ai::llm::client::LlmBackend::LocalLlama,
             &system_prompt,
             "",
+            Clearance::Internal,
         )
         .await?;
 

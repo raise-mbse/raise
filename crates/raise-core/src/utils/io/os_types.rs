@@ -14,3 +14,9 @@ pub use std::process::ExitStatus as ProcessExitStatus; // 🎯 Ajout pour la com
 
 /// 🤖 IA NOTE : Représente un processus en cours d'exécution.
 pub use std::process::Child as ProcessChild;
+
+/// 🤖 IA NOTE : Extensions Unix pour les permissions de fichiers.
+pub use std::os::unix::fs::PermissionsExt as UnixFilePermissions;
+
+/// 🤖 IA NOTE : Récupération du dossier temporaire de l'OS.
+pub use std::env::temp_dir as os_temp_dir;

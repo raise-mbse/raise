@@ -12,6 +12,63 @@ pub use serde_json::json as json_value;
 pub use serde_json::Map as JsonObject;
 pub use serde_json::Value as JsonValue;
 
+// =========================================================================
+// 🛡️ MODÉLISATION DE LA SOUVERAINETÉ (CLEARANCE)
+// =========================================================================
+
+/// Représentation Rust stricte de la propriété "clearance" définie dans `base.schema.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Clearance {
+    #[serde(rename = "C1-Public")]
+    Public,
+    #[serde(rename = "C2-Interne")]
+    Internal,
+    #[serde(rename = "C2-CA")]
+    InternalCloudAct,
+    #[default]
+    #[serde(rename = "C3-Privé")]
+    Private,
+    #[serde(rename = "C3-CA")]
+    PrivateCloudAct,
+    #[serde(rename = "C4-Secret")]
+    Secret,
+    #[serde(rename = "C5-Très-Secret")]
+    TopSecret,
+}
+
+impl Clearance {
+    /// Méthode critique de sécurité : Détermine si la donnée a le droit absolu d'être envoyée
+    /// vers une API Cloud (LLM distant, Stockage externe).
+    /// Retourne `true` uniquement pour les niveaux publics ou expressément compatibles Cloud Act.
+    pub fn is_cloud_authorized(&self) -> bool {
+        matches!(
+            self,
+            Clearance::Public | Clearance::InternalCloudAct | Clearance::PrivateCloudAct
+        )
+    }
+}
+
+/// Tente d'extraire le niveau de confidentialité (Clearance) directement depuis un objet JSON brut.
+/// Si le champ n'existe pas ou est mal formé, retourne la valeur par défaut (C3-Privé) par sécurité.
+pub fn extract_clearance(value: &JsonValue) -> Clearance {
+    if let JsonValue::Object(map) = value {
+        if let Some(JsonValue::String(c_str)) = map.get("clearance") {
+            // Désérialisation manuelle pour éviter un panic sur un JSON mal formé
+            return match c_str.as_str() {
+                "C1-Public" => Clearance::Public,
+                "C2-Interne" => Clearance::Internal,
+                "C2-CA" => Clearance::InternalCloudAct,
+                "C3-Privé" => Clearance::Private,
+                "C3-CA" => Clearance::PrivateCloudAct,
+                "C4-Secret" => Clearance::Secret,
+                "C5-Très-Secret" => Clearance::TopSecret,
+                _ => Clearance::Private, // Fallback ultra-sécuritaire
+            };
+        }
+    }
+    Clearance::default()
+}
+
 /// Désérialise une chaîne JSON (`&str`) en un type fortement typé `T`.
 /// 🤖 IA NOTE: Capture automatiquement un extrait du JSON en cas d'erreur de parsing pour le diagnostic.
 pub fn deserialize_from_str<T: DeserializableOwned>(s: &str) -> RaiseResult<T> {
@@ -148,13 +205,49 @@ mod tests {
     struct User {
         id: u32,
         role: String,
+        #[serde(default)]
+        clearance: Clearance,
     }
 
     #[test]
     fn test_deserialize_success() {
-        let raw = r#"{"id": 1, "role": "admin"}"#;
+        let raw = r#"{"id": 1, "role": "admin", "clearance": "C4-Secret"}"#;
         let user: User = deserialize_from_str(raw).unwrap();
         assert_eq!(user.id, 1);
+        assert_eq!(user.clearance, Clearance::Secret);
+    }
+
+    #[test]
+    fn test_clearance_default_fallback() {
+        // Un utilisateur sans clearance définie doit tomber sur le fallback par défaut (Privé)
+        let raw = r#"{"id": 2, "role": "user"}"#;
+        let user: User = deserialize_from_str(raw).unwrap();
+        assert_eq!(user.clearance, Clearance::Private);
+    }
+
+    #[test]
+    fn test_extract_clearance_from_json_value() {
+        let doc = json_value!({
+            "name": "Mission Apollo",
+            "clearance": "C1-Public"
+        });
+
+        let clearance = extract_clearance(&doc);
+        assert_eq!(clearance, Clearance::Public);
+        assert!(clearance.is_cloud_authorized());
+    }
+
+    #[test]
+    fn test_extract_clearance_security_fallback() {
+        // En cas d'erreur de frappe, le système doit verrouiller (Private)
+        let doc = json_value!({
+            "name": "Projet Top Secret",
+            "clearance": "C5-Tres-Secret" // Manque l'accent
+        });
+
+        let clearance = extract_clearance(&doc);
+        assert_eq!(clearance, Clearance::Private); // Verrouillage de sécurité
+        assert!(!clearance.is_cloud_authorized());
     }
 
     #[test]

@@ -11,6 +11,7 @@ use crate::ai::world_model::{NeuroSymbolicEngine, WorldAction, WorldTrainer};
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::storage::StorageEngine;
 use crate::model_engine::types::{ArcadiaElement, ProjectModel};
+use crate::utils::data::json::Clearance;
 use crate::utils::prelude::*;
 
 // --- IMPORTS AGENTS ---
@@ -208,7 +209,8 @@ impl AiOrchestrator {
                     LlmBackend::GoogleGemini,
                     "Tu es un expert Arcadia.",
                     &prompt,
-                ) // 🎯 FIX 4 : OpenAI au lieu de OpenAi
+                    Clearance::Public,
+                )
                 .await?
         };
 

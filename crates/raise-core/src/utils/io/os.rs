@@ -121,6 +121,22 @@ where
     rt.block_on(app)
 }
 
+/// Point d'entrée étanche pour les applications RAISE standard (CLI, Desktop)
+/// Masque totalement l'existence de Tokio aux crates appelantes.
+pub fn run_cli_app<F>(app: F) -> RaiseResult<()>
+where
+    F: std::future::Future<Output = RaiseResult<()>>,
+{
+    // Construction manuelle du moteur asynchrone par défaut
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("🚨 [RAISE KERNEL PANIC] Échec critique : Impossible d'initialiser le moteur asynchrone");
+
+    // On bloque le thread principal du binaire pour exécuter la logique
+    rt.block_on(app)
+}
+
 /// Exécute une tâche d'inférence ou de calcul intensif (CPU/GPU) sur un thread dédié.
 /// 🎯 ZÉRO DETTE : Isole le runtime Tokio des opérations bloquantes pour éviter le gel de l'UI.
 #[instrument(skip(task))]

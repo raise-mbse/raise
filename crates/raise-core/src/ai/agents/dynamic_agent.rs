@@ -9,6 +9,7 @@ use super::tools::{extract_json_from_llm, load_session, save_artifacts_batch, sa
 use super::{Agent, AgentContext, AgentResult, CreatedArtifact};
 
 use crate::ai::llm::client::LlmBackend;
+use crate::utils::data::json::Clearance;
 
 /// L'Agent Dynamique piloté par les données (Data-Driven).
 pub struct DynamicAgent {
@@ -126,7 +127,12 @@ impl Agent for DynamicAgent {
         // 5. Exécution neuronale
         let response = match ctx
             .llm
-            .ask(LlmBackend::LocalLlama, &system_prompt, &user_prompt)
+            .ask(
+                LlmBackend::LocalLlama,
+                &system_prompt,
+                &user_prompt,
+                Clearance::Internal,
+            )
             .await
         {
             Ok(res) => res,
