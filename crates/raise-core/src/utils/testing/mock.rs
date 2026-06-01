@@ -263,6 +263,7 @@ pub fn create_default_test_config() -> AppConfig {
     );
     AppConfig {
         id: UniqueId::new_v4().to_string(),
+        handle: "bootstrap".to_string(),
         created_at: UtcClock::now().to_rfc3339(),
         updated_at: UtcClock::now().to_rfc3339(),
         semantic_type: vec!["SystemConfig".to_string()],

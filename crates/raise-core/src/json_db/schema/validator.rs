@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/json_db/schema/validator.rs
+// FICHIER : crates/raise-core/src/json_db/schema/validator.rs
 
 use super::registry::SchemaRegistry;
 use crate::rules_engine::compute::{execute_compute_plan, ComputeContext};

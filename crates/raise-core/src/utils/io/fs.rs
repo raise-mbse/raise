@@ -320,6 +320,44 @@ pub fn rename_sync<P: AsRef<Path>>(from: P, to: P) -> RaiseResult<()> {
     }
 }
 
+/// 🤖 IA NOTE : Copie un répertoire et tout son contenu de manière récursive et asynchrone.
+pub async fn copy_dir_recursive_async(
+    src: impl AsRef<Path>,
+    dst: impl AsRef<Path>,
+) -> RaiseResult<()> {
+    let src = src.as_ref();
+    let dst = dst.as_ref();
+
+    create_dir_all_async(dst).await?;
+
+    let mut entries = read_dir_async(src).await?;
+
+    loop {
+        let entry_res = entries.next_entry().await;
+        let entry = match entry_res {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(e) => crate::raise_error!("ERR_FS_ENTRY_READ", error = e),
+        };
+
+        let ty = match entry.file_type().await {
+            Ok(t) => t,
+            Err(e) => crate::raise_error!("ERR_FS_FILETYPE", error = e),
+        };
+
+        let dest_path = dst.join(entry.file_name());
+
+        if ty.is_dir() {
+            // Box::pin évite la dépendance à la macro async_recursion
+            Box::pin(copy_dir_recursive_async(entry.path(), dest_path)).await?;
+        } else {
+            copy_async(entry.path(), dest_path).await?;
+        }
+    }
+
+    Ok(())
+}
+
 // =========================================================================
 // 3. ÉCRITURE ATOMIQUE (Anti-Corruption)
 // =========================================================================

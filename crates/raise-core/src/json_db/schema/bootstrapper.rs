@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/json_db/schema/bootstrapper.rs
+// FICHIER : crates/raise-core/src/json_db/schema/bootstrapper.rs
 
 use async_recursion::async_recursion;
 

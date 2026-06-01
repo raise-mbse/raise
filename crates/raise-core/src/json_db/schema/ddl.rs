@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/json_db/schema/ddl.rs
+// FICHIER : crates/raise-core/src/json_db/schema/ddl.rs
 
 use crate::json_db::collections::manager::{CollectionsManager, SystemIndexTx};
 use crate::json_db::query::{Condition, FilterOperator, Query, QueryEngine, QueryFilter};
@@ -22,7 +22,7 @@ impl<'a> DdlHandler<'a> {
         let sys_db = &app_config.mount_points.system.db;
 
         let schema_uri = format!(
-            "db://{}/{}/schemas/v2/db/index.schema.json",
+            "db://{}/{}/schemas/v2/db/system/index_raise.schema.json",
             sys_domain, sys_db
         );
         self.init_db_with_schema(&schema_uri).await

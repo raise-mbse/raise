@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/json_db/schema/registry.rs
+// FICHIER : crates/raise-core/src/json_db/schema/registry.rs
 
 use crate::json_db::storage::JsonDbConfig;
 use crate::utils::prelude::*;

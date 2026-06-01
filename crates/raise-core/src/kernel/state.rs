@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/kernel/state.rs
+// FICHIER : crates/raise-core/src/kernel/state.rs
 
 use crate::utils::prelude::*; // 🎯 Façade Unique RAISE
 

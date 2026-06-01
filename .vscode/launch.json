@@ -4,36 +4,14 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug CLI (Interactive AI) - FIXED",
+      "name": "🚀 Debug Raise CLI",
       "program": "${workspaceFolder}/target/debug/raise-cli",
-      "args": ["ai", "i"],
       "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
       "env": {
         "RUST_BACKTRACE": "1",
-        "RUST_LOG": "debug"
+        "RUST_LOG": "debug,raise_core=trace" 
       },
-
-      "preLaunchTask": "build raise-cli"
-    },
-    {
-      "type": "lldb",
-      "request": "launch",
-      "name": "Debug CLI (JsonDB List)",
-      "program": "${workspaceFolder}/target/debug/raise-cli",
-      "args": ["jsondb", "list-collections"],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "RUST_BACKTRACE": "1"
-      },
-      "preLaunchTask": "build raise-cli"
-    },
-    {
-      "type": "lldb",
-      "request": "launch",
-      "name": "Debug CLI (Validator)",
-      "program": "${workspaceFolder}/target/debug/raise-cli",
-      "args": ["validator", "check", "--path", "./dataset/exemple.json"],
-      "cwd": "${workspaceFolder}",
       "preLaunchTask": "build raise-cli"
     }
   ]

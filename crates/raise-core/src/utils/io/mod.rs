@@ -23,9 +23,8 @@ pub use zstd::Decoder as CompressionDecoder;
 pub use zstd::Encoder as CompressionEncoder;
 
 pub use fs::{
-    // Async API
     copy_async,
-    // Sync API
+    copy_dir_recursive_async,
     copy_sync,
     create_dir_all_async,
     create_dir_all_sync,

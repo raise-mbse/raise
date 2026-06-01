@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/utils/data/config.rs
+// FICHIER : crates/raise-core/src/utils/data/config.rs
 
 // 1. Base de données (AI-Ready Queries)
 use crate::json_db::collections::manager::CollectionsManager;
@@ -6,7 +6,7 @@ use crate::json_db::query::{Condition, FilterOperator, Query, QueryEngine, Query
 // 2. Core : Environnement, Concurrence et Erreurs
 use crate::utils::core::error::AppError;
 use crate::utils::core::error::RaiseResult;
-use crate::utils::core::{RuntimeEnv, StaticCell};
+use crate::utils::core::{RuntimeEnv, StaticCell, UniqueId};
 use crate::{kernel_fatal, raise_error};
 
 // 3. I/O : Système de fichiers
@@ -31,6 +31,8 @@ pub const BOOTSTRAP_DB: &str = "bootstrap";
 pub struct AppConfig {
     #[serde(rename = "_id")]
     pub id: String,
+
+    pub handle: String,
 
     #[serde(rename = "_created_at")]
     pub created_at: String,
@@ -197,6 +199,8 @@ impl AppConfig {
             return Ok(());
         }
 
+        crate::utils::core::env::load_local_env(std::path::Path::new(".env"));
+
         let target_env = if cfg!(test) || RuntimeEnv::var("RAISE_ENV_MODE").as_deref() == Ok("test")
         {
             "test".to_string()
@@ -243,8 +247,41 @@ impl AppConfig {
         self.core.env_mode == "test"
     }
 
-    pub fn get_path(&self, id: &str) -> Option<PathBuf> {
-        self.paths.get(id).map(PathBuf::from)
+    pub fn get_path(&self, key: &str) -> Option<PathBuf> {
+        // 1. Priorité absolue à l'environnement OS (le fichier .env chargé en RAM)
+        let raw_path = match RuntimeEnv::var(key) {
+            Ok(v) => v,
+            Err(_) => {
+                // 2. Fallback sur la configuration interne (JSON)
+                match self.paths.get(key) {
+                    Some(p) => p.to_string(),
+                    None => return None,
+                }
+            }
+        };
+
+        // 3. ANCRAGE UTILISATEUR (Tilde) -> /home/user/...
+        if raw_path.starts_with("~/") {
+            let home_dir = dirs::home_dir()?;
+            let clean_path = raw_path.trim_start_matches("~/");
+            return Some(home_dir.join(clean_path));
+        }
+
+        let path = PathBuf::from(raw_path);
+
+        // 4. ANCRAGE SYSTÈME ABSOLU (ex: /var/lib/raise)
+        if path.is_absolute() {
+            return Some(path);
+        }
+
+        // 5. ANCRAGE BINAIRE (PORTABLE) -> Résolu par rapport à l'exécutable
+        match RuntimeEnv::current_exe() {
+            Ok(mut exe_path) => {
+                exe_path.pop(); // Remonte au dossier parent de l'exécutable
+                Some(exe_path.join(path))
+            }
+            Err(_) => None,
+        }
     }
 
     pub async fn get_runtime_settings(
@@ -331,6 +368,15 @@ impl AppConfig {
         });
 
         let Some((config_path, raw_json, _json_val)) = system_match else {
+            crate::user_warn!(
+                "WRN_BOOTSTRAP_MODE",
+                json_value!({
+                    "environment": env,
+                    "hint": format!("Configuration système '{}' introuvable sur le disque. Activation du mode Bootstrap In-Memory.", target_profile)
+                })
+            );
+            return Ok(Self::generate_bootstrap_config());
+            /*
             raise_error!(
                 "ERR_CONFIG_SYS_MISSING",
                 error = format!("Configuration système '{}' introuvable.", target_profile),
@@ -340,6 +386,7 @@ impl AppConfig {
                     "hint": "Vérifiez qu'un fichier avec ce handle existe dans _system/bootstrap/collections/configs/"
                 })
             );
+            */
         };
 
         let mut config: AppConfig = match json::deserialize_from_str(&raw_json) {
@@ -420,6 +467,81 @@ impl AppConfig {
         }
 
         Ok(config)
+    }
+
+    /// Génère une configuration matérielle minimale en RAM pour autoriser l'amorçage
+    /// d'une station vierge. Les vrais paramètres seront forgés plus tard par le Bootstrapper.
+    fn generate_bootstrap_config() -> Self {
+        let (domain, db) = Self::get_bootstrap_pointers();
+        let mut paths = UnorderedMap::new();
+        if let Ok(home) = RuntimeEnv::var("HOME") {
+            paths.insert(
+                "PATH_RAISE_DOMAIN".to_string(),
+                format!("{}/production_domain", home),
+            );
+            paths.insert(
+                "PATH_RAISE_DATASET".to_string(),
+                format!("{}/production_dataset", home),
+            );
+        }
+        Self {
+            id: UniqueId::new_v4().to_string(),
+            handle: "bootstrap".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            semantic_type: vec!["Configuration".to_string()],
+            name: None,
+            mount_points: MountPointsConfig {
+                system: DbPointer {
+                    domain: domain.clone(),
+                    db: db.clone(),
+                },
+                raise: DbPointer {
+                    domain: domain.clone(),
+                    db: "raise_core".to_string(),
+                },
+                exploration: DbPointer {
+                    domain: "sandbox".to_string(),
+                    db: "exploration".to_string(),
+                },
+                modeling: DbPointer {
+                    domain: "sandbox".to_string(),
+                    db: "modeling".to_string(),
+                },
+                simulation: DbPointer {
+                    domain: "sandbox".to_string(),
+                    db: "simulation".to_string(),
+                },
+                integration: DbPointer {
+                    domain: "sandbox".to_string(),
+                    db: "integration".to_string(),
+                },
+                production: DbPointer {
+                    domain: "sandbox".to_string(),
+                    db: "production".to_string(),
+                },
+                operation: DbPointer {
+                    domain: "sandbox".to_string(),
+                    db: "operation".to_string(),
+                },
+            },
+            core: CoreConfig {
+                env_mode: "development".to_string(),
+                graph_mode: "none".to_string(),
+                log_level: "info".to_string(),
+                vector_store_provider: "memory".to_string(),
+                language: "en".to_string(),
+                use_gpu: false,
+            },
+            paths: UnorderedMap::new(),
+            active_dapp_id: "bootstrap".to_string(),
+            workstation_id: "bootstrap_ws".to_string(),
+            active_services: vec![],
+            active_components: vec![],
+            workstation: None,
+            user: None,
+            system_assets: SystemAssets::default(),
+        }
     }
 
     /// 🎯 RETOURNE LE CHEMIN, LE TEXTE BRUT ET L'ARBRE PARSÉ
@@ -573,6 +695,7 @@ mod tests {
         // 🎯 On crée un JSON qui respecte strictement la structure V2
         let json_data = json_value!({
             "_id": "cfg_test",
+            "handle": "cfg_test_handle",
             "_created_at": "2026-01-01T00:00:00Z",
             "_updated_at": "2026-01-01T00:00:00Z",
             "@type": ["Configuration"],

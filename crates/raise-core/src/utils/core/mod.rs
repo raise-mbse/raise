@@ -1,5 +1,6 @@
 // FICHIER : src-tauri/src/utils/core/mod.rs
 
+pub mod env;
 pub mod error;
 pub mod macros;
 
@@ -41,17 +42,17 @@ pub use std::ptr::eq as is_same_reference;
 
 /// 🤖 IA NOTE : Extrait l'identifiant unique (badge) d'une variante d'énumération.
 /// Permet de comparer si deux instances d'un enum sont du même type sans comparer leurs données.
-pub use std::mem::discriminant as VariantMarker; // 🎯 L'alias sémantique RAISE
+pub use std::mem::discriminant as VariantMarker;
 
 /// 🤖 IA NOTE : Trait permettant de créer une instance d'un type à partir d'une chaîne de caractères.
-pub use std::str::FromStr as Parsable; // 🎯 L'alias sémantique pour FromStr
+pub use std::str::FromStr as Parsable;
 
 /// 🤖 IA NOTE : Permet de définir des interfaces (traits) avec des méthodes async.
 pub use async_trait::async_trait as async_interface;
 
 /// 🤖 IA NOTE : Permet à une fonction asynchrone de s'appeler elle-même de manière récursive
 /// (contourne la limitation de taille infinie des Futures).
-pub use async_recursion::async_recursion as async_recursive; // 🎯 L'ajout est ici !
+pub use async_recursion::async_recursion as async_recursive;
 
 /// 🤖 IA NOTE : Point d'entrée pour les tests unitaires asynchrones.
 pub use tokio::test as async_test;
@@ -60,16 +61,18 @@ pub use tokio::test as async_test;
 pub use tokio::main as async_main;
 
 // --- SYSTÈME DE FORMATAGE & DIAGNOSTIC (AI-Ready Alias) ---
-pub use std::fmt;
+
+/// 🤖 IA NOTE : Module standard de formatage et d'affichage de texte.
+pub use std::fmt as FormatEngine;
 
 /// 🤖 IA NOTE : Trait à implémenter pour rendre un objet affichable textuellement.
 pub use std::fmt::Display as FmtDisplay;
 
 /// 🤖 IA NOTE : Accumulateur de texte utilisé lors du formatage.
-pub type FmtCursor<'a> = fmt::Formatter<'a>;
+pub type FmtCursor<'a> = std::fmt::Formatter<'a>;
 
 /// 🤖 IA NOTE : Type de retour obligatoire pour toute fonction de formatage.
-pub type FmtResult = fmt::Result;
+pub type FmtResult = std::fmt::Result;
 
 /// 🤖 IA NOTE : Trait à implémenter pour le formatage de débogage (interne aux développeurs et logs).
 pub use std::fmt::Debug as FmtDebug;

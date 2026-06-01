@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/json_db/collections/manager.rs
+// FICHIER : crates/raise-core/src/json_db/collections/manager.rs
 use crate::utils::prelude::*;
 
 use crate::json_db::indexes::IndexManager;
@@ -1395,6 +1395,14 @@ pub fn parse_smart_link(s: &str) -> Option<SmartLink<'_>> {
             None
         }
     } else if let Some(without_scheme) = s.strip_prefix("db://") {
+        // 🛡️ BOUCLIER SÉMANTIQUE : Ignorer les URIs des Assets de l'Usine
+        if s.contains("/schemas/")
+            || s.contains("/ontologies/")
+            || s.contains("/ontology/")
+            || s.contains("/@context/")
+        {
+            return None;
+        }
         let parts: Vec<&str> = without_scheme.splitn(5, '/').collect();
         if parts.len() == 5 {
             Some(SmartLink::Absolute {

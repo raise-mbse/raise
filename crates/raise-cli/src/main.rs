@@ -9,10 +9,7 @@ use raise_core::ai::assurance::health::RaiseHealthEngine;
 use raise_core::kernel::state::RaiseKernelState;
 use raise_core::utils::io::os::run_cli_app;
 use raise_core::{
-    json_db::{
-        collections::manager::CollectionsManager,
-        storage::{JsonDbConfig, StorageEngine},
-    },
+    json_db::{collections::manager::CollectionsManager, storage::StorageEngine},
     raise_error, user_debug, user_error, user_info, user_warn,
     utils::{context, prelude::*},
 };
@@ -157,6 +154,24 @@ fn main() -> RaiseResult<()> {
         };
 
         // 5. INITIALISATION DU MOTEUR DE STOCKAGE
+        user_info!(
+            "CLI_BOOTSTRAP_INIT",
+            json_value!({"action": "Vérification et garantie de l'environnement physique..."})
+        );
+
+        let node_env = match raise_core::kernel::environment::NodeEnvironment::boot_physical_node()
+            .await
+        {
+            Ok(env) => env,
+            Err(e) => raise_error!(
+                "ERR_CLI_PHYSICAL_BOOT",
+                error = e,
+                context = json_value!({"hint": "Impossible d'amorcer le nœud matériel. Vérifiez les droits d'écriture."})
+            ),
+        };
+
+        let storage = node_env.storage;
+        /*
         let db_root = match config.get_path("PATH_RAISE_DOMAIN") {
             Some(path) => path,
             None => raise_error!(
@@ -166,6 +181,7 @@ fn main() -> RaiseResult<()> {
         };
 
         let storage = SharedRef::new(StorageEngine::new(JsonDbConfig::new(db_root))?);
+        */
 
         // ---------------------------------------------------------
         // 🧠 INITIALISATION SÉMANTIQUE (Bootstrapping In-Index)
