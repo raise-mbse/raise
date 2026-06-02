@@ -7,6 +7,7 @@ use crate::utils::core::{FmtCursor, FmtDisplay, FmtResult, RuntimeEnv, SharedRef
 use crate::utils::data::config::AppConfig;
 use crate::utils::data::json::{json_value, JsonValue};
 use crate::utils::io::fs::{self, Path, PathBuf};
+use crate::utils::prelude::*;
 use crate::{raise_error, user_info, user_success, user_warn};
 
 // ==============================================================================
@@ -64,7 +65,7 @@ pub struct NodeEnvironment {
 }
 
 impl NodeEnvironment {
-    pub async fn boot_physical_node() -> RaiseResult<Self> {
+    pub async fn boot_physical_node() -> RaiseResult<(Self, bool)> {
         let config = AppConfig::get();
 
         let domain_root = match config.get_path("PATH_RAISE_DOMAIN") {
@@ -111,10 +112,10 @@ impl NodeEnvironment {
         let system_manager = CollectionsManager::new(&storage, &bootstrap_domain, &bootstrap_db);
         let bootstrapper = SystemBootstrapper::new(system_manager, bootstrap_domain, bootstrap_db);
 
-        match bootstrapper.execute_if_needed().await {
-            Ok(_) => (),
+        let needs_restart = match bootstrapper.execute_if_needed().await {
+            Ok(status) => status,
             Err(e) => raise_error!("ERR_KERNEL_BOOTSTRAP_EXEC", error = e),
-        }
+        };
 
         for phase in IndustrialPhase::ALL.iter() {
             match Self::ensure_partition(&storage, &local_domain, phase).await {
@@ -130,10 +131,13 @@ impl NodeEnvironment {
             })
         );
 
-        Ok(Self {
-            storage,
-            local_domain,
-        })
+        Ok((
+            Self {
+                storage,
+                local_domain,
+            },
+            needs_restart,
+        ))
     }
 
     async fn ensure_partition(
@@ -154,30 +158,29 @@ impl NodeEnvironment {
         }
 
         let manager = CollectionsManager::new(storage, domain, &db_name);
-        let ddl = crate::json_db::schema::ddl::DdlHandler::new(&manager);
 
         let schema_version =
             RuntimeEnv::var("PATH_RAISE_SCHEMA_VERSION").unwrap_or_else(|_| "v2".to_string());
 
-        // 🎯 L'AIGUILLAGE SÉMANTIQUE : Le Polymorphisme des Partitions
-        // On assigne le bon ADN (schéma) en fonction de la vocation de la base
         let schema_filename = match phase {
             IndustrialPhase::Raise => "index_raise.schema.json",
             IndustrialPhase::Modeling => "index_mbse.schema.json",
             IndustrialPhase::Simulation => "index_mbse.schema.json",
             IndustrialPhase::System => "index_bootstrap.schema.json",
-            // Par défaut, les autres partitions utilisent l'index générique
             _ => "index_raise.schema.json",
         };
 
-        // L'URI pointera dynamiquement vers le bon fichier
+        let sys_domain =
+            RuntimeEnv::var("RAISE_BOOTSTRAP_DOMAIN").unwrap_or_else(|_| "_system".to_string());
+        let sys_db = RuntimeEnv::var("RAISE_BOOTSTRAP_DB").unwrap_or_else(|_| "master".to_string());
+
         let schema_uri = format!(
             "db://{}/{}/schemas/{}/system/db/{}",
-            domain, db_name, schema_version, schema_filename
+            sys_domain, sys_db, schema_version, schema_filename
         );
 
-        // 🎯 ACTION : On crée la base avec son schéma spécifique, ET on l'inscrit dans la gouvernance de 'master'
-        match ddl.create_db_with_schema(&schema_uri).await {
+        // 🎯 L'API native du CollectionsManager est respectée
+        match manager.create_db_with_schema(&schema_uri).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 let err_str = e.to_string();
@@ -225,17 +228,6 @@ impl<'a> SystemBootstrapper<'a> {
         Ok(root.join(&self.domain).join(&self.db))
     }
 
-    fn get_assets_root(&self) -> RaiseResult<PathBuf> {
-        match self.config.get_path("PATH_RAISE_ASSET") {
-            Some(p) => Ok(p),
-            None => raise_error!(
-                "ERR_BOOT_NO_ASSET_PATH",
-                error = "PATH_RAISE_ASSET manquant"
-            ),
-        }
-    }
-
-    // 🎯 UTILITAIRE : Extrait de manière robuste le "document" d'une opération Seed (Array ou Object)
     fn extract_operation_documents(raw: JsonValue) -> Vec<JsonValue> {
         let mut docs = Vec::new();
         if let Some(arr) = raw.as_array() {
@@ -268,41 +260,45 @@ impl<'a> SystemBootstrapper<'a> {
         vec![raw]
     }
 
-    // 🎯 MUTATEUR SÉMANTIQUE CHIRURGICAL : Navigue dans l'arbre et corrige uniquement les URIs cibles
     fn reanchor_semantic_node(&self, doc: &mut JsonValue) {
         let local_ontology = format!("db://{}/{}/ontologies/", self.domain, self.db);
         let local_prefix = format!("db://{}/{}/", self.domain, self.db);
 
         match doc {
-            JsonValue::Object(obj) => {
-                let keys_to_check = ["@context", "@id", "$schema", "$ref"];
+            JsonValue::String(s) => {
+                let mut new_s = s.to_string();
+                let mut modified = false;
 
-                for key in keys_to_check {
-                    if let Some(val) = obj.get_mut(key) {
-                        if let Some(s) = val.as_str() {
-                            if key == "@context" {
-                                let new_s = s
-                                    .replace("db://_system/ontology/", &local_ontology)
-                                    .replace("db://_system/ai-assets/ontologies/", &local_ontology)
-                                    .replace("db://_system/master/ontologies/", &local_ontology);
-                                *val = json_value!(new_s);
-                            } else {
-                                if s.starts_with("db://_system/")
-                                    || s.starts_with("db://ai-assets/")
-                                {
-                                    let new_s = s
-                                        .replace("db://_system/master/", &local_prefix)
-                                        .replace("db://_system/bootstrap/", &local_prefix)
-                                        .replace("db://_system/_system/", &local_prefix)
-                                        .replace("db://_system/raise/", &local_prefix)
-                                        .replace("db://_system/ai-assets/", &local_prefix);
-                                    *val = json_value!(new_s);
-                                }
-                            }
-                        }
-                    }
+                // 1. Remplacement prioritaire pour les ontologies
+                if new_s.contains("db://_system/ontology/")
+                    || new_s.contains("db://_system/master/ontologies/")
+                    || new_s.contains("db://_system/ai-assets/ontologies/")
+                {
+                    new_s = new_s
+                        .replace("db://_system/ontology/", &local_ontology)
+                        .replace("db://_system/master/ontologies/", &local_ontology)
+                        .replace("db://_system/ai-assets/ontologies/", &local_ontology);
+                    modified = true;
                 }
 
+                // 2. Remplacement global des préfixes d'usine pour le reste (schemas, refs, etc.)
+                if new_s.starts_with("db://_system/") || new_s.starts_with("db://ai-assets/") {
+                    new_s = new_s
+                        .replace("db://_system/master/", &local_prefix)
+                        .replace("db://_system/bootstrap/", &local_prefix)
+                        .replace("db://_system/_system/", &local_prefix)
+                        .replace("db://_system/raise/", &local_prefix)
+                        .replace("db://_system/ai-assets/", &local_prefix)
+                        .replace("db://ai-assets/", &local_prefix);
+                    modified = true;
+                }
+
+                if modified {
+                    *doc = json_value!(new_s);
+                }
+            }
+            // 🔄 Traversée récursive universelle (sans filtrage par clés)
+            JsonValue::Object(obj) => {
                 for (_, v) in obj.iter_mut() {
                     self.reanchor_semantic_node(v);
                 }
@@ -316,7 +312,7 @@ impl<'a> SystemBootstrapper<'a> {
         }
     }
 
-    pub async fn execute_if_needed(&self) -> RaiseResult<()> {
+    pub async fn execute_if_needed(&self) -> RaiseResult<bool> {
         let db_path = match self.db_path() {
             Ok(p) => p,
             Err(e) => raise_error!("ERR_BOOT_GET_PATH", error = e),
@@ -343,14 +339,14 @@ impl<'a> SystemBootstrapper<'a> {
                 json_value!({"status": "already_seeded"})
             );
 
-            // 🧠 RÉVEIL DU CERVEAU SÉMANTIQUE (Avec l'emprunt &)
+            // 🧠 RÉVEIL DU CERVEAU SÉMANTIQUE
             if let Err(e) =
                 crate::json_db::jsonld::VocabularyRegistry::init_from_db(&self.manager).await
             {
                 user_warn!("WRN_VOCABULARY_INIT", json_value!({"error": e.to_string()}));
             }
 
-            return Ok(());
+            return Ok(false);
         }
 
         // =========================================================
@@ -361,13 +357,10 @@ impl<'a> SystemBootstrapper<'a> {
             json_value!({"action": "provisioning_db", "db": self.db})
         );
 
-        match self.step_1_import_schemas().await {
+        // 🎯 ÉTAPE 1 & 2 : Bootstrap Natif
+        match self.step_1_and_2_native_bootstrap().await {
             Ok(_) => (),
-            Err(e) => raise_error!("ERR_BOOT_STEP_1", error = e),
-        }
-        match self.step_2_create_db().await {
-            Ok(_) => (),
-            Err(e) => raise_error!("ERR_BOOT_STEP_2", error = e),
+            Err(e) => raise_error!("ERR_BOOT_STEP_1_2", error = e),
         }
 
         // 🧬 Les Ontologies sont écrites sur le disque
@@ -376,7 +369,7 @@ impl<'a> SystemBootstrapper<'a> {
             Err(e) => raise_error!("ERR_BOOT_STEP_3", error = e),
         }
 
-        // 🧠 RÉVEIL DU CERVEAU SÉMANTIQUE : On charge l'ADN en RAM (Avec l'emprunt &)
+        // 🧠 RÉVEIL DU CERVEAU SÉMANTIQUE
         user_info!(
             "BOOT_SEMANTIC_INIT",
             json_value!({"action": "Chargement du VocabularyRegistry"})
@@ -411,180 +404,235 @@ impl<'a> SystemBootstrapper<'a> {
             "BOOT_SYSTEM_COMPLETE",
             json_value!({"status": "success", "db": self.db})
         );
-        Ok(())
+        Ok(true)
     }
 
-    async fn step_1_import_schemas(&self) -> RaiseResult<()> {
-        let assets_root = self.get_assets_root()?;
+    // =========================================================================
+    // 🎯 ÉTAPES 1 & 2 : Importation Cross-Domain et Émancipation Native
+    // =========================================================================
+    async fn step_1_and_2_native_bootstrap(&self) -> RaiseResult<()> {
+        let asset_domain =
+            RuntimeEnv::var("RAISE_ASSET_DOMAIN").unwrap_or_else(|_| "_system".to_string());
+        let asset_db =
+            RuntimeEnv::var("RAISE_ASSET_DB").unwrap_or_else(|_| "ai-assets".to_string());
         let schema_version =
             RuntimeEnv::var("PATH_RAISE_SCHEMA_VERSION").unwrap_or_else(|_| "v2".to_string());
 
-        let source_path = assets_root.join("schemas").join(&schema_version);
-        let target_path = self.db_path()?.join("schemas").join(&schema_version);
+        let sys_json_path = self.db_path()?.join("_system.json");
 
-        if !fs::exists_async(&source_path).await {
-            raise_error!(
-                "ERR_BOOT_SCHEMA_MISSING",
-                error = "Schémas d'amorçage introuvables.",
-                context = json_value!({"path": source_path.to_string_lossy()})
-            );
+        // =====================================================================
+        // 0. ADOUBEMENT DE L'USINE (Répare l'usine si $schema est manquant)
+        // =====================================================================
+        let factory_path = match self.config.get_path("PATH_RAISE_ASSET") {
+            Some(p) => p,
+            None => raise_error!(
+                "ERR_BOOT_NO_ASSET_PATH",
+                error = "PATH_RAISE_ASSET manquant"
+            ),
+        };
+        let factory_index_path = factory_path.join("_system.json");
+
+        // On regénère l'index de l'usine s'il est manquant ou s'il n'a pas de $schema (ancienne version)
+        let mut needs_factory_index = true;
+        if fs::exists_async(&factory_index_path).await {
+            if let Ok(idx) = fs::read_json_async::<JsonValue>(&factory_index_path).await {
+                if idx.get("$schema").is_some() {
+                    needs_factory_index = false;
+                }
+            }
         }
 
+        if needs_factory_index {
+            user_info!(
+                "BOOT_FACTORY_INDEX",
+                json_value!({"action": "Génération dynamique de l'index de l'usine"})
+            );
+            let schemas_dir = factory_path.join("schemas").join(&schema_version);
+            let mut schemas_map = crate::utils::data::json::JsonObject::new();
+
+            if fs::exists_async(&schemas_dir).await {
+                let mut queue = vec![schemas_dir.clone()];
+                while let Some(dir) = queue.pop() {
+                    let mut entries = match fs::read_dir_async(&dir).await {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+
+                        if is_dir {
+                            queue.push(path);
+                        } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                            if let Ok(rel_path) = path.strip_prefix(&schemas_dir) {
+                                let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+                                let file_str = format!("{}/{}", schema_version, rel_str);
+                                schemas_map.insert(rel_str, json_value!({ "file": file_str }));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let factory_schema_uri = format!(
+                "db://{}/{}/schemas/{}/system/db/index_bootstrap.schema.json",
+                asset_domain, asset_db, schema_version
+            );
+
+            let factory_index = json_value!({
+                "$schema": factory_schema_uri,
+                "handle": format!("{}_{}", asset_domain, asset_db),
+                "name": "Factory Assets",
+                "space": asset_domain,
+                "database": asset_db,
+                "collections": {},
+                "schemas": { schema_version.clone(): schemas_map },
+                "ontologies": {},
+                "rules": {},
+                "db_role": "factory"
+            });
+            fs::write_json_atomic_async(&factory_index_path, &factory_index).await?;
+        }
+
+        // =====================================================================
+        // 1. CRÉATION DE L'EMBRYON MASTER (Avec $schema certifié)
+        // =====================================================================
+        if !fs::exists_async(&sys_json_path).await {
+            user_info!(
+                "BOOT_MASTER_INIT",
+                json_value!({"action": "Génération de l'embryon Master"})
+            );
+            fs::create_dir_all_async(self.db_path()?).await?;
+
+            let local_schema_uri = format!(
+                "db://{}/{}/schemas/{}/system/db/index_bootstrap.schema.json",
+                self.domain, self.db, schema_version
+            );
+
+            let embryon = json_value!({
+                "$schema": local_schema_uri,
+                "handle": format!("{}_{}", self.domain, self.db),
+                "name": "Master Database",
+                "space": self.domain,
+                "database": self.db,
+                "collections": {},
+                "schemas": {},
+                "ontologies": {},
+                "rules": {},
+                "db_role": "system"
+            });
+            fs::write_json_atomic_async(&sys_json_path, &embryon).await?;
+        }
+
+        // =====================================================================
+        // 2. TRANSFERT DES SCHÉMAS (Via 2 Managers, Zéro Dette)
+        // =====================================================================
         user_info!(
-            "BOOT_COPY_SCHEMAS",
-            json_value!({"source": source_path.to_string_lossy(), "target": target_path.to_string_lossy()})
+            "BOOT_IMPORT_SCHEMAS",
+            json_value!({"action": "Importation cross-domain", "source": asset_db})
         );
 
-        let mut schemas_index = json_value!({});
-        let mut queue = vec![(source_path.clone(), target_path.clone())];
+        let factory_root = factory_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| factory_path.clone());
+        let factory_storage = match StorageEngine::new(JsonDbConfig::new(factory_root)) {
+            Ok(s) => s,
+            Err(e) => raise_error!("ERR_BOOT_FACTORY_STORAGE", error = e),
+        };
 
-        while let Some((curr_src, curr_tgt)) = queue.pop() {
-            if !fs::exists_async(&curr_tgt).await {
-                if let Err(e) = fs::create_dir_all_async(&curr_tgt).await {
-                    raise_error!("ERR_BOOT_MKDIR", error = e);
-                }
-            }
+        let factory_mgr = CollectionsManager::new(&factory_storage, &asset_domain, &asset_db);
+        let factory_index = match factory_mgr.load_index().await {
+            Ok(idx) => idx,
+            Err(e) => raise_error!("ERR_BOOT_FACTORY_INDEX", error = e),
+        };
 
-            let mut entries = match fs::read_dir_async(&curr_src).await {
-                Ok(e) => e,
-                Err(e) => raise_error!("ERR_BOOT_READDIR", error = e),
-            };
-
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                let target_file = curr_tgt.join(entry.file_name());
-
-                if path.is_dir() {
-                    queue.push((path, target_file.clone()));
-                } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                    let content = match fs::read_to_string_async(&path).await {
-                        Ok(c) => c,
-                        Err(e) => raise_error!(
-                            "ERR_BOOT_READ_FILE",
-                            error = e,
-                            context = json_value!({"file": path.to_string_lossy()})
-                        ),
-                    };
-
-                    let mut schema_json =
-                        match crate::utils::data::json::deserialize_from_str::<JsonValue>(&content)
-                        {
-                            Ok(j) => j,
-                            Err(e) => raise_error!(
-                                "ERR_BOOT_PARSE_JSON",
-                                error = format!("Erreur de parsing JSON : {}", e),
-                                context = json_value!({"file": path.to_string_lossy()})
-                            ),
-                        };
-
-                    // Application chirurgicale du Mutateur
+        if let Some(schemas) = factory_index["schemas"]
+            .get(&schema_version)
+            .and_then(|v| v.as_object())
+        {
+            for (schema_key, _) in schemas {
+                let schema_uri = format!(
+                    "db://{}/{}/schemas/{}/{}",
+                    asset_domain, asset_db, schema_version, schema_key
+                );
+                if let Ok(mut schema_json) = factory_mgr.get_schema_def(&schema_uri).await {
+                    // 🎯 MAGIE : On réécrit l'ADN pour qu'il pointe sur master AVANT de le sauvegarder
                     self.reanchor_semantic_node(&mut schema_json);
 
-                    if let Some(obj) = schema_json.as_object_mut() {
-                        if let Ok(rel_path) = path.strip_prefix(&assets_root) {
-                            let rel_str = rel_path.to_string_lossy().replace('\\', "/");
-                            let expected_uri =
-                                format!("db://{}/{}/{}", self.domain, self.db, rel_str);
-                            obj.insert("$id".to_string(), json_value!(expected_uri));
-                        }
-                    }
-
-                    if let Err(e) = fs::write_json_atomic_async(&target_file, &schema_json).await {
-                        raise_error!(
-                            "ERR_BOOT_WRITE_JSON",
-                            error = e,
-                            context = json_value!({"file": target_file.to_string_lossy()})
-                        );
-                    }
-
-                    if let Ok(rel_path) = target_file.strip_prefix(&target_path) {
-                        let rel_str = rel_path.to_string_lossy().replace('\\', "/");
-                        if let Some(obj) = schemas_index.as_object_mut() {
-                            obj.insert(
-                                rel_str.clone(),
-                                json_value!({ "file": format!("{}/{}", schema_version, rel_str) }),
-                            );
-                        }
-                    }
-                } else {
-                    if let Err(e) = fs::copy_async(&path, &target_file).await {
-                        raise_error!(
-                            "ERR_BOOT_COPY_FILE",
-                            error = e,
-                            context = json_value!({"file": target_file.to_string_lossy()})
+                    if let Err(e) = self
+                        .manager
+                        .create_schema_def(schema_key, schema_json)
+                        .await
+                    {
+                        user_warn!(
+                            "WRN_BOOT_CREATE_SCHEMA",
+                            json_value!({"key": schema_key, "error": e.to_string()})
                         );
                     }
                 }
             }
         }
 
-        let sys_path = self.db_path()?.join("_system.json");
-        let seed_index = json_value!({
-            "collections": {},
-            "ontologies": {},
-            "rules": {},
-            "schemas": {
-                schema_version: schemas_index
-            }
-        });
+        // =====================================================================
+        // 3. L'ADOUBEMENT FINAL ET CALCUL SÉMANTIQUE (Le réveil du DDL)
+        // =====================================================================
+        user_info!(
+            "BOOT_EMANCIPATION",
+            json_value!({"action": "Autonomisation de Master et génération des collections"})
+        );
 
-        if let Err(e) = fs::write_json_atomic_async(&sys_path, &seed_index).await {
-            raise_error!("ERR_BOOT_WRITE_SEED", error = e);
-        }
-
-        Ok(())
-    }
-
-    async fn step_2_create_db(&self) -> RaiseResult<()> {
-        let schema_version =
-            RuntimeEnv::var("PATH_RAISE_SCHEMA_VERSION").unwrap_or_else(|_| "v2".to_string());
-
-        let schema_uri = format!(
+        let local_schema_uri = format!(
             "db://{}/{}/schemas/{}/system/db/index_bootstrap.schema.json",
             self.domain, self.db, schema_version
         );
 
-        match self.manager.init_db_with_schema(&schema_uri).await {
-            Ok(_) => (),
-            Err(e) => {
-                let err_str = e.to_string();
-                if !err_str.contains("already initialized") {
-                    raise_error!("ERR_BOOT_INIT_DB", error = e);
-                }
+        if let Err(e) = self.manager.init_db_with_schema(&local_schema_uri).await {
+            if !e.to_string().contains("already initialized") {
+                raise_error!("ERR_BOOT_EMANCIPATION", error = e);
             }
         }
 
-        if let Err(e) = self
+        // =====================================================================
+        // 4. NETTOYAGE ULTIME & SYNCHRONISATION PHYSIQUE (Lazy Sync)
+        // =====================================================================
+        let lock = self
             .manager
-            .alter_db("db_role", json_value!("system"))
-            .await
-        {
-            raise_error!("ERR_BOOT_ALTER_DB_ROLE", error = e);
-        }
+            .storage
+            .get_index_lock(&self.domain, &self.db)?;
+        let guard = lock.lock().await;
+        let mut tx = self.manager.begin_system_tx(&guard).await?;
+
+        // 🎯 FIX ULTIME : Le DDL vient d'injecter les collections par défaut depuis le schéma source.
+        // On repasse le mutateur sémantique sur l'intégralité du jeton pour écraser les restes de 'ai-assets' !
+        self.reanchor_semantic_node(&mut tx.document);
+
+        let bootstrapper =
+            crate::json_db::schema::bootstrapper::SchemaBootstrapper::new(&self.manager);
+        bootstrapper.sync_physical_collections(&mut tx).await?;
+        tx.commit().await?;
 
         Ok(())
     }
 
+    // =========================================================================
+    // 🎯 ÉTAPE 3 : Alignement strict sur le CLI (Importation des Ontologies)
+    // =========================================================================
     async fn step_3_import_and_register_ontologies(&self) -> RaiseResult<()> {
-        let schema_version =
-            RuntimeEnv::var("PATH_RAISE_SCHEMA_VERSION").unwrap_or_else(|_| "v2".to_string());
-        let assets_root = self.get_assets_root()?;
+        let factory_path = match self.config.get_path("PATH_RAISE_ASSET") {
+            Some(p) => p,
+            None => raise_error!(
+                "ERR_BOOT_NO_ASSET_PATH",
+                error = "PATH_RAISE_ASSET manquant"
+            ),
+        };
+        let ontologies_dir = factory_path.join("ontologies");
 
-        let onto_schema = format!(
-            "db://{}/{}/schemas/{}/system/db/ontology.schema.json",
-            self.domain, self.db, schema_version
+        user_info!(
+            "BOOT_ONTOLOGIES",
+            json_value!({"action": "Importation pure déléguée au moteur json_db"})
         );
-
-        match self
-            .manager
-            .create_collection("_ontologies", &onto_schema)
-            .await
-        {
-            Ok(_) => (),
-            Err(e) => raise_error!("ERR_BOOT_CREATE_ONTO_COLL", error = e),
-        }
-
-        let assets_base = assets_root.join("ontologies");
 
         let ontology_files = vec![
             (
@@ -643,42 +691,52 @@ impl<'a> SystemBootstrapper<'a> {
             ),
         ];
 
-        for (namespace, rel_path, handle, version) in ontology_files {
-            let file_path = assets_base.join(rel_path);
+        // =========================================================
+        // PHASE 1 : jsondb import (Délégation totale au CollectionsManager)
+        // =========================================================
+        for (_, rel_path, handle, _) in &ontology_files {
+            let file_path = ontologies_dir.join(rel_path);
 
             if fs::exists_async(&file_path).await {
-                let raw_doc: JsonValue = match fs::read_json_async(&file_path).await {
-                    Ok(d) => d,
-                    Err(e) => raise_error!(
-                        "ERR_BOOT_ONTO_READ_PARSE",
-                        error = e,
-                        context = json_value!({"file": file_path.to_string_lossy().to_string()})
-                    ),
+                let json: JsonValue = fs::read_json_async(&file_path).await?;
+
+                let docs = if let Some(arr) = json.as_array() {
+                    arr.to_vec()
+                } else {
+                    vec![json]
                 };
 
-                let docs_to_insert = Self::extract_operation_documents(raw_doc);
+                let count = docs.len();
 
-                for mut doc in docs_to_insert {
+                for mut doc in docs {
                     self.reanchor_semantic_node(&mut doc);
-
                     match self.manager.upsert_document("_ontologies", doc).await {
-                        Ok(_) => (),
-                        Err(e) => raise_error!("ERR_BOOT_ONTO_UPSERT", error = e),
+                        Ok(_) => {}
+                        Err(e) => {
+                            user_warn!(
+                                "JSONDB_IMPORT_PARTIAL_FAIL",
+                                json_value!({
+                                    "error": e.to_string(),
+                                    "hint": "L'import de ce document a échoué. Le script continue."
+                                })
+                            );
+                        }
                     }
+                }
 
-                    let uri = format!(
-                        "db://{}/{}/collections/_ontologies/handle/{}",
-                        self.domain, self.db, handle
-                    );
+                user_success!(
+                    "JSONDB_IMPORT_SUCCESS",
+                    json_value!({ "count": count, "handle": handle })
+                );
 
-                    match self
-                        .manager
-                        .register_ontology(namespace, &uri, version)
-                        .await
-                    {
-                        Ok(_) => (),
-                        Err(e) => raise_error!("ERR_BOOT_ONTO_REGISTER", error = e),
-                    }
+                // jsondb alter-db
+                if *handle == "onto-raise-core" {
+                    self.manager
+                        .alter_db(
+                            "@context",
+                            json_value!("ref:_ontologies:handle:onto-raise-core"),
+                        )
+                        .await?;
                 }
             } else {
                 user_warn!(
@@ -688,23 +746,43 @@ impl<'a> SystemBootstrapper<'a> {
             }
         }
 
-        if let Err(e) = self
-            .manager
-            .alter_db(
-                "@context",
-                json_value!("ref:_ontologies:handle:onto-raise-core"),
-            )
-            .await
-        {
-            raise_error!("ERR_BOOT_ALTER_DB_CONTEXT", error = e);
+        // =========================================================
+        // PHASE 2 : jsondb register-ontology
+        // =========================================================
+        for (namespace, rel_path, handle, version) in &ontology_files {
+            let file_path = ontologies_dir.join(rel_path);
+
+            if fs::exists_async(&file_path).await {
+                let uri = format!(
+                    "db://{}/{}/collections/_ontologies/handle/{}",
+                    self.domain, self.db, handle
+                );
+
+                // 🎯 ALIGNEMENT STRICT : Appel métier suivi du log exact du CLI
+                self.manager
+                    .register_ontology(namespace, &uri, version)
+                    .await?;
+
+                user_success!(
+                    "JSONDB_ONTOLOGY_REGISTERED",
+                    json_value!({ "namespace": namespace })
+                );
+            }
         }
 
         Ok(())
     }
 
     async fn step_4_import_locales(&self) -> RaiseResult<()> {
-        let assets_root = self.get_assets_root()?;
-        let locales_dir = assets_root.join("locales");
+        // 🎯 FIX ZÉRO DETTE : On lit l'usine externe depuis le .env
+        let factory_path = match self.config.get_path("PATH_RAISE_ASSET") {
+            Some(p) => p,
+            None => raise_error!(
+                "ERR_BOOT_NO_ASSET_PATH",
+                error = "PATH_RAISE_ASSET manquant"
+            ),
+        };
+        let locales_dir = factory_path.join("locales");
         let schema_version =
             RuntimeEnv::var("PATH_RAISE_SCHEMA_VERSION").unwrap_or_else(|_| "v2".to_string());
 
@@ -748,8 +826,15 @@ impl<'a> SystemBootstrapper<'a> {
     }
 
     async fn step_5_import_seeds(&self) -> RaiseResult<()> {
-        let assets_root = self.get_assets_root()?;
-        let system_seeds_dir = assets_root.join("seeds").join(&self.db);
+        // 🎯 FIX ZÉRO DETTE : On lit l'usine externe depuis le .env
+        let factory_path = match self.config.get_path("PATH_RAISE_ASSET") {
+            Some(p) => p,
+            None => raise_error!(
+                "ERR_BOOT_NO_ASSET_PATH",
+                error = "PATH_RAISE_ASSET manquant"
+            ),
+        };
+        let system_seeds_dir = factory_path.join("seeds").join(&self.db);
 
         if fs::exists_async(&system_seeds_dir).await {
             user_info!(

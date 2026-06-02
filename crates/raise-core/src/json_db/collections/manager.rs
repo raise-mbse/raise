@@ -1520,7 +1520,6 @@ mod tests {
         let sandbox = DbSandbox::new().await?;
         let manager = CollectionsManager::new(&sandbox.storage, "system_test", "db_test");
 
-        // 🎯 FIX : On teste explicitement la mécanique d'initialisation (génération de l'ID et des defaults)
         let schema_uri = format!(
             "db://{}/{}/schemas/v1/db/index.schema.json",
             crate::utils::data::config::BOOTSTRAP_DOMAIN,
@@ -1552,7 +1551,8 @@ mod tests {
 
         let expected_migration_uri = format!(
             "db://{}/{}/schemas/v1/db/migration.schema.json",
-            manager.space, manager.db
+            crate::utils::data::config::BOOTSTRAP_DOMAIN,
+            crate::utils::data::config::BOOTSTRAP_DB
         );
 
         assert_eq!(

@@ -69,12 +69,17 @@ pub const SESSION_SCHEMA_MOCK: &str = r#"{
         "status": { "type": "string", "enum": ["active", "idle", "expired", "revoked"] },
         "expires_at": { "type": "string", "format": "date-time" },
         "last_activity_at": { "type": "string", "format": "date-time" },
-        "context": { 
-            "type": "object",
-            "required": ["current_domain", "current_db", "active_dapp_id"] 
-        }
+        "current_domain": { "type": "string" },
+        "current_db": { "type": "string" },
+        "active_dapp_id": { "type": "string" },
+        "is_simulation": { "type": "boolean", "default": false },
+        "sim_domain": { "type": "string" },
+        "sim_db": { "type": "string" }
     },
-    "required": ["user_id", "status", "context"]
+    "required": [
+        "user_id", "status", "current_domain", "current_db", "active_dapp_id",
+        "is_simulation", "sim_domain", "sim_db"
+    ]
 }"#;
 
 pub const ACTORS_SCHEMA_MOCK: &str =
@@ -129,11 +134,9 @@ pub const USER_SCHEMA_MOCK: &str = r#"{
         },
         "handle": { "type": "string" },
         "name": { "type": "object" },
-        "default_domain": { "type": "string" },
-        "default_db": { "type": "string" },
         "role": { "type": "string" }
     },
-    "required": ["_id", "handle",  "name", "default_domain", "default_db"]
+    "required": ["_id", "handle", "name"]
 }"#;
 
 // =========================================================================
@@ -362,6 +365,8 @@ pub fn create_default_test_config() -> AppConfig {
 
         workstation: None,
         user: None,
+        dapp: None,
+        mandator: None,
     }
 }
 
@@ -619,8 +624,6 @@ pub async fn inject_mock_user(manager: &CollectionsManager<'_>, userhandle: &str
     let user_doc = json_value!({
         "handle": userhandle,
         "name": { "fr": userhandle, "en": userhandle },
-        "default_domain": "mbse2",
-        "default_db": "drones",
         "role": "engineer"
     });
 

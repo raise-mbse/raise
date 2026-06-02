@@ -61,8 +61,8 @@ pub async fn handle(args: UtilsArgs, ctx: CliContext) -> RaiseResult<()> {
                     "CLI_SESSION_ACTIVE",
                     json_value!({
                         "user": session.user_id,
-                        "domain": session.context.current_domain,
-                        "db": session.context.current_db
+                        "domain": session.current_domain,
+                        "db": session.current_db
                     })
                 );
             } else {

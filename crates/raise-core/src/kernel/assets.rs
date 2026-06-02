@@ -1,6 +1,6 @@
 // FICHIER : crates/raise-core/src/kernel/assets.rs
 
-use crate::utils::prelude::*; // 🎯 Façade Unique RAISE (Tolérance Zéro)
+use crate::utils::prelude::*;
 
 pub struct AssetResolver;
 

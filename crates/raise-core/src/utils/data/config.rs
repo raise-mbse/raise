@@ -24,7 +24,7 @@ pub static DEVICE: StaticCell<candle_core::Device> = StaticCell::new();
 
 /// Constantes Système pour amorcer la première lecture
 pub const BOOTSTRAP_DOMAIN: &str = "_system";
-pub const BOOTSTRAP_DB: &str = "bootstrap";
+pub const BOOTSTRAP_DB: &str = "master";
 
 /// Configuration globale structurée par niveaux de responsabilité
 #[derive(Debug, Clone, Serializable, Deserializable, PartialEq)]
@@ -63,9 +63,13 @@ pub struct AppConfig {
 
     // --- SCOPES RUNTIME (DYNAMIQUE) ---
     #[serde(skip)]
+    pub dapp: Option<ScopeConfig>,
+    #[serde(skip)]
     pub workstation: Option<ScopeConfig>,
     #[serde(skip)]
     pub user: Option<ScopeConfig>,
+    #[serde(skip)]
+    pub mandator: Option<ScopeConfig>,
 
     #[serde(default)]
     pub system_assets: SystemAssets,
@@ -135,7 +139,6 @@ where
         }
         Ok(types)
     } else {
-        // 🎯 FINI LES FALLBACKS : Si le format est mauvais, on bloque la désérialisation
         Err(DeserializationErrorTrait::custom(
             "Le champ '@type' est invalide. Attendu : String ou Array de Strings.",
         ))
@@ -353,18 +356,115 @@ impl AppConfig {
         (domain, db)
     }
 
+    // =====================================================================
+    // 🧬 SÉQUENCE D'AMORÇAGE CONTEXTUEL BOTTOM-UP OPTIMISÉE (IaD)
+    // =====================================================================
     fn load_production_config(env: &str) -> RaiseResult<Self> {
-        let target_profile =
-            RuntimeEnv::var("RAISE_PROFILE").unwrap_or_else(|_| "raise_core".to_string());
+        // 🟢 ÉTAPE 1 : WORKSTATION (La Fondation Matérielle)
+        let target_hostname = RuntimeEnv::var("RAISE_WORKSTATION")
+            .or_else(|_| RuntimeEnv::var("HOSTNAME"))
+            .or_else(|_| RuntimeEnv::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "localhost".to_string());
 
-        // 🎯 MATCH STRICT : On cherche le handle ET on vérifie que le statut est "active"
+        let ws_lookup = Self::load_collection_doc_with_meta("workstations", |v| {
+            v.get("hostname").and_then(|h| h.as_str()) == Some(target_hostname.as_str())
+        });
+
+        let mut current_ws_id = String::new();
+        let mut current_ws_handle = String::new();
+        let mut current_owner_id = String::new();
+        let mut ws_language = None;
+
+        if let Some((_, _, ws_doc)) = ws_lookup {
+            current_ws_handle = ws_doc
+                .get("handle")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            // On récupère le VRAI _id UUID pour l'intersection
+            current_ws_id = ws_doc
+                .get("_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            current_owner_id = ws_doc
+                .get("owner_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            ws_language = ws_doc
+                .get("language")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+        }
+
+        // 🟢 ÉTAPE 2 : DAPP (Le Contexte Logiciel)
+        let exe_path = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => raise_error!(
+                "ERR_CONFIG_CURRENT_EXE",
+                error = "Impossible de déterminer l'exécutable en cours d'exécution.",
+                context = json_value!({"details": e.to_string()})
+            ),
+        };
+
+        let exe_name = match exe_path.file_stem() {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => raise_error!(
+                "ERR_CONFIG_EXE_NAME",
+                error = "Le binaire exécuté n'a pas de nom de fichier valide.",
+                context = json_value!({"path": exe_path.to_string_lossy()})
+            ),
+        };
+
+        let normalized_exe = exe_name.replace("-", "_");
+        let target_dapp = RuntimeEnv::var("RAISE_DAPP").unwrap_or(normalized_exe);
+
+        let dapp_lookup = Self::load_collection_doc_with_meta("dapps", |v| {
+            v.get("plugin_config")
+                .and_then(|pc| pc.get("rust_package_name"))
+                .and_then(|n| n.as_str())
+                == Some(target_dapp.as_str())
+                || v.get("handle").and_then(|h| h.as_str()) == Some(target_dapp.as_str())
+        });
+
+        let mut current_dapp_id = String::new();
+        let mut current_dapp_handle = String::new();
+
+        if let Some((_, _, dapp_doc)) = dapp_lookup {
+            current_dapp_handle = dapp_doc
+                .get("handle")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            // On récupère le VRAI _id UUID
+            current_dapp_id = dapp_doc
+                .get("_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+        }
+
+        // 🟢 ÉTAPE 3 : CONFIG (L'Intersection)
+        let profile_override = RuntimeEnv::var("RAISE_PROFILE").ok();
+
         let system_match = Self::load_collection_doc_with_meta("configs", |v| {
-            let handle_match = v.get("handle").and_then(|h| h.as_str())
-                == Some(target_profile.as_str())
-                || v.get("_id").and_then(|id| id.as_str()) == Some(target_profile.as_str());
-
             let is_active = v.get("status").and_then(|s| s.as_str()) != Some("inactive");
-            handle_match && is_active
+            if !is_active {
+                return false;
+            }
+
+            if let Some(ref profile) = profile_override {
+                v.get("handle").and_then(|h| h.as_str()) == Some(profile.as_str())
+                    || v.get("_id").and_then(|id| id.as_str()) == Some(profile.as_str())
+            } else {
+                // 🎯 On compare avec les VRAIS UUID résolus dans la BDD !
+                let match_ws = v.get("workstation_id").and_then(|id| id.as_str())
+                    == Some(current_ws_id.as_str());
+                let match_dapp = v.get("active_dapp_id").and_then(|id| id.as_str())
+                    == Some(current_dapp_id.as_str());
+                match_ws && match_dapp
+            }
         });
 
         let Some((config_path, raw_json, _json_val)) = system_match else {
@@ -372,21 +472,10 @@ impl AppConfig {
                 "WRN_BOOTSTRAP_MODE",
                 json_value!({
                     "environment": env,
-                    "hint": format!("Configuration système '{}' introuvable sur le disque. Activation du mode Bootstrap In-Memory.", target_profile)
+                    "hint": format!("Aucune configuration liant Workstation '{}' et DApp '{}' trouvée.", current_ws_handle, current_dapp_handle)
                 })
             );
             return Ok(Self::generate_bootstrap_config());
-            /*
-            raise_error!(
-                "ERR_CONFIG_SYS_MISSING",
-                error = format!("Configuration système '{}' introuvable.", target_profile),
-                context = json_value!({
-                    "target_profile": target_profile,
-                    "target_environment": env,
-                    "hint": "Vérifiez qu'un fichier avec ce handle existe dans _system/bootstrap/collections/configs/"
-                })
-            );
-            */
         };
 
         let mut config: AppConfig = match json::deserialize_from_str(&raw_json) {
@@ -409,36 +498,35 @@ impl AppConfig {
                 raise_error!(
                     "ERR_CONFIG_SCHEMA_INVALID",
                     error = e.to_string(),
-                    context = json_value!({
-                        "file": config_path.to_string_lossy(),
-                        "profile": target_profile
-                    })
+                    context = json_value!({ "file": config_path.to_string_lossy() })
                 )
             }
         };
 
-        let hostname = RuntimeEnv::var("HOSTNAME")
-            .or_else(|_| RuntimeEnv::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "localhost".to_string());
-
-        if let Some((_, _, ws_json)) = Self::load_collection_doc_with_meta("workstations", |v| {
-            v.get("hostname").and_then(|h| h.as_str()) == Some(hostname.as_str())
-        }) {
+        if !current_ws_handle.is_empty() {
             config.workstation = Some(ScopeConfig {
-                id: hostname,
-                language: ws_json
-                    .get("language")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
+                id: current_ws_handle,
+                language: ws_language,
+            });
+        }
+        if !current_dapp_handle.is_empty() {
+            config.dapp = Some(ScopeConfig {
+                id: current_dapp_handle,
+                language: None,
             });
         }
 
-        let userhandle = RuntimeEnv::var("USER")
+        // 🟢 ÉTAPE 4 : USER (Le Contexte Identitaire)
+        let os_user = RuntimeEnv::var("USER")
             .or_else(|_| RuntimeEnv::var("USERNAME"))
             .unwrap_or_else(|_| "unknown".to_string());
 
+        let mut current_user_id = String::new(); // 🎯 L'UUID résolu par jsondb
         let user_json = Self::load_collection_doc_with_meta("users", |v| {
-            v.get("handle").and_then(|u| u.as_str()) == Some(userhandle.as_str())
+            let match_os = v.get("handle").and_then(|u| u.as_str()) == Some(os_user.as_str());
+            let match_owner = !current_owner_id.is_empty()
+                && v.get("_id").and_then(|u| u.as_str()) == Some(current_owner_id.as_str());
+            match_os || match_owner
         })
         .or_else(|| {
             Self::load_collection_doc_with_meta("users", |v| {
@@ -446,24 +534,51 @@ impl AppConfig {
             })
         });
 
-        if let Some((_, _, doc)) = user_json {
+        if let Some((_, _, user_doc)) = user_json {
+            let handle = user_doc
+                .get("handle")
+                .and_then(|v| v.as_str())
+                .unwrap_or("admin");
+            // 🎯 On stocke le véritable _id de l'utilisateur
+            current_user_id = user_doc
+                .get("_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
             config.user = Some(ScopeConfig {
-                id: doc
-                    .get("handle")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("admin")
-                    .to_string(),
-                language: doc
+                id: handle.to_string(),
+                language: user_doc
                     .get("preferences")
                     .and_then(|p| p.get("language"))
                     .and_then(|v| v.as_str())
                     .map(String::from),
             });
-            config.workstation_id = doc
-                .get("default_workstation_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("ref:workstations:handle:condorcet")
-                .to_string();
+        }
+
+        // 🟢 ÉTAPE 5 : MANDATOR (Le Contexte d'Autorité)
+        if !current_user_id.is_empty() {
+            if let Some((_, _, mandator_doc)) =
+                Self::load_collection_doc_with_meta("mandators", |v| {
+                    if let Some(user_ids) = v.get("user_ids").and_then(|arr| arr.as_array()) {
+                        // 🎯 On compare avec l'UUID réel !
+                        user_ids
+                            .iter()
+                            .any(|id| id.as_str() == Some(&current_user_id))
+                    } else {
+                        false
+                    }
+                })
+            {
+                config.mandator = Some(ScopeConfig {
+                    id: mandator_doc
+                        .get("handle")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    language: None,
+                });
+            }
         }
 
         Ok(config)
@@ -540,6 +655,8 @@ impl AppConfig {
             active_components: vec![],
             workstation: None,
             user: None,
+            dapp: None,
+            mandator: None,
             system_assets: SystemAssets::default(),
         }
     }
@@ -552,7 +669,11 @@ impl AppConfig {
     where
         F: Fn(&JsonValue) -> bool,
     {
-        let base_domain = dirs::home_dir()?.join("raise_domain");
+        // 🎯 On instancie une config "sonde" pour utiliser get_path !
+        let probe_config = Self::generate_bootstrap_config();
+
+        let base_domain = probe_config.get_path("PATH_RAISE_DOMAIN")?;
+
         let (bios_domain, bios_db) = Self::get_bootstrap_pointers();
 
         let collection_dir = base_domain
@@ -560,6 +681,7 @@ impl AppConfig {
             .join(bios_db)
             .join("collections")
             .join(collection_name);
+
         if !collection_dir.exists() {
             return None;
         }
@@ -654,19 +776,18 @@ impl AppConfig {
         if let Some(absolute_path) = asset_path_opt {
             Ok(PathBuf::from(absolute_path))
         } else {
-            // 🛡️ Fallback : On reconstruit le chemin relatif depuis le point de montage système
-            let domain_path = match self.get_path("PATH_RAISE_DOMAIN") {
+            // 🛡️ Fallback : On utilise le dossier centralisé des assets
+            let asset_root_path = match self.get_path("PATH_RAISE_ASSET") {
                 Some(p) => p,
                 None => raise_error!(
-                    "ERR_CONFIG_DOMAIN_PATH_MISSING",
-                    error = "Le chemin racine 'PATH_RAISE_DOMAIN' est absent de la configuration."
+                    "ERR_CONFIG_ASSET_PATH_MISSING",
+                    error = "La variable 'PATH_RAISE_ASSET' est absente de la configuration (JSON ou .env)."
                 ),
             };
-
-            Ok(domain_path
-                .join(&self.mount_points.system.domain)
-                .join(&self.mount_points.system.db)
-                .join(fallback_suffix))
+            let clean_suffix = fallback_suffix
+                .strip_prefix("ai-assets/")
+                .unwrap_or(fallback_suffix);
+            Ok(asset_root_path.join(clean_suffix))
         }
     }
 }

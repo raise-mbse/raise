@@ -141,11 +141,7 @@ fn main() -> RaiseResult<()> {
 
         let active_domain = match cli.domain.clone() {
             Some(d) => d,
-            None => match &config.user {
-                // Utilisation sécurisée des nouveaux points de montage
-                Some(u) => u.id.clone(), // Fallback sur ID utilisateur pour le domaine si non spécifié
-                None => config.mount_points.system.domain.clone(),
-            },
+            None => config.mount_points.system.domain.clone(),
         };
 
         let active_db = match cli.db.clone() {
@@ -159,17 +155,23 @@ fn main() -> RaiseResult<()> {
             json_value!({"action": "Vérification et garantie de l'environnement physique..."})
         );
 
-        let node_env = match raise_core::kernel::environment::NodeEnvironment::boot_physical_node()
-            .await
-        {
-            Ok(env) => env,
-            Err(e) => raise_error!(
-                "ERR_CLI_PHYSICAL_BOOT",
-                error = e,
-                context = json_value!({"hint": "Impossible d'amorcer le nœud matériel. Vérifiez les droits d'écriture."})
-            ),
-        };
+        let (node_env, needs_restart) =
+            match raise_core::kernel::environment::NodeEnvironment::boot_physical_node().await {
+                Ok(env) => env,
+                Err(e) => raise_error!(
+                    "ERR_CLI_PHYSICAL_BOOT",
+                    error = e,
+                    context = json_value!({"hint": "Impossible d'amorcer le nœud matériel. Vérifiez les droits d'écriture."})
+                ),
+            };
 
+        if needs_restart {
+            user_info!(
+                "NODE_BOOT_SIGNAL",
+                json_value!({"action": "Amorçage atomique complet. Terminaison du processus par le lanceur."})
+            );
+            terminate_process(0);
+        }
         let storage = node_env.storage;
         /*
         let db_root = match config.get_path("PATH_RAISE_DOMAIN") {
@@ -266,7 +268,7 @@ fn main() -> RaiseResult<()> {
         };
 
         // 6. CRÉATION DU CONTEXTE UNIFIÉ
-        let ctx = CliContext {
+        let mut ctx = CliContext {
             config,
             session_mgr,
             storage,
@@ -288,7 +290,12 @@ fn main() -> RaiseResult<()> {
             );
         } else {
             match ctx.session_mgr.start_session(&ctx.active_user).await {
-                Ok(_) => {
+                Ok(session) => {
+                    ctx.active_domain = session.current_domain.clone();
+                    ctx.active_db = session.current_db.clone();
+                    ctx.is_simulation = session.is_simulation;
+                    ctx.sim_domain = session.sim_domain.clone();
+                    ctx.sim_db = session.sim_db.clone();
                     user_info!(
                         "CLI_START_INITIALIZED",
                         json_value!({
@@ -350,14 +357,22 @@ async fn run_global_shell(mut ctx: CliContext) -> RaiseResult<()> {
         None => raise_error!("CLI_HISTORY_PATH_ERROR"),
     };
 
-    let _ = rl.load_history(&history_path);
+    if let Err(e) = rl.save_history(&history_path) {
+        user_warn!(
+            "CLI_HISTORY_SAVE_FAILED",
+            json_value!({"error": e.to_string(), "path": history_path.display().to_string()})
+        );
+    }
 
     loop {
         // AUTO-SYNC : On demande au noyau la vérité absolue
         if let Some(session) = ctx.session_mgr.get_current_session().await {
             ctx.active_user = session.user_handle.clone();
-            ctx.active_domain = session.context.current_domain.clone();
-            ctx.active_db = session.context.current_db.clone();
+            ctx.active_domain = session.current_domain.clone();
+            ctx.active_db = session.current_db.clone();
+            ctx.is_simulation = session.is_simulation;
+            ctx.sim_domain = session.sim_domain.clone();
+            ctx.sim_db = session.sim_db.clone();
         }
 
         let prompt = format!(
@@ -372,7 +387,9 @@ async fn run_global_shell(mut ctx: CliContext) -> RaiseResult<()> {
                 if input.is_empty() {
                     continue;
                 }
+
                 let _ = rl.add_history_entry(input.as_str());
+                let _ = rl.save_history(&history_path);
 
                 if input == "exit" || input == "quit" {
                     break;
