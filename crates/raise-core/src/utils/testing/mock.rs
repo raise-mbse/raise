@@ -354,7 +354,7 @@ pub fn create_default_test_config() -> AppConfig {
         active_components: vec![
             "ref:components:handle:ai_llm".to_string(),
             "ref:components:handle:ai_nlp".to_string(),
-            "ref:components:handle:context_rag".to_string(), // 🎯 FIX
+            "ref:components:handle:ai_context".to_string(), // 🎯 FIX
             "ref:components:handle:ai_graph_store".to_string(),
             "ref:components:handle:ai_world_model".to_string(),
             "ref:components:handle:ai_voice".to_string(),
@@ -427,7 +427,7 @@ pub fn load_test_sandbox() -> RaiseResult<AppConfig> {
     let required_ai_components = vec![
         "ref:components:handle:ai_llm",
         "ref:components:handle:ai_nlp",
-        "ref:components:handle:context_rag", // 🎯 FIX
+        "ref:components:handle:ai_context", // 🎯 FIX
         "ref:components:handle:ai_graph_store",
         "ref:components:handle:ai_world_model",
         "ref:components:handle:ai_voice",
@@ -1208,7 +1208,7 @@ impl AgentDbSandbox {
         // 2. RAG & Graph Store (Mémoire)
         inject_mock_component(
             &temp_manager,
-            "context_rag", // 🎯 FIX NOMENCLATURE : "context_rag"
+            "ai_context", // 🎯 FIX NOMENCLATURE : "ai_context"
             json_value!({
                 "model_name": "minilm",
                 "provider": "mock",

@@ -400,9 +400,6 @@ impl Reconciler {
                             .insert("raw_imports".to_string(), file_dependencies.join(","));
                     }
 
-                    // Garantie absolue que le graphe relationnel natif est vierge à l'extraction
-                    // element.dependencies.clear();
-
                     // 🎯 CHRONOLOGIE : Mémoriser la position physique exacte du code source
                     let seq_index = elements.len().to_string();
                     element
@@ -634,7 +631,7 @@ impl Reconciler {
         Ok((element, i))
     }
 
-    /// 🚀 AUTO-TAGGING & GARBAGE COLLECTOR : Injecte, corrige et nettoie les ancres sémantiques à partir d'un nœud MBSE.
+    /// 🚀 AUTO-TAGGING & GARBAGE COLLECTOR : Injecte, corrige et nettoie les ancres sémantiques.
     pub async fn auto_tag_module(module_doc: &JsonValue) -> RaiseResult<usize> {
         // --- 1. RÉSOLUTION SÉMANTIQUE ---
         let handle = module_doc
@@ -721,70 +718,85 @@ impl Reconciler {
             }
         }
 
-        let mut brace_depth: usize = 0;
+        // =========================================================================
+        // 🎯 L'OPTION B : TRAQUEUR DE PORTÉE RÉCURSIF (Scope Stack Zéro Dette)
+        // =========================================================================
+        #[derive(Debug, Clone, PartialEq)]
+        enum BlockType {
+            Mod(String),
+            Impl,
+            Trait,
+            Fn,
+            Struct,
+            Enum,
+            Macro,
+            Other,
+        }
+
+        let mut block_stack: Vec<BlockType> = Vec::new();
+        let mut pending_block: Option<BlockType> = None;
+        let mut in_signature = false;
         let mut element_start_idx = 0;
         let mut i = 0;
-        let mut test_scope_depth: Option<usize> = None;
 
         while i < tokens.len() {
             let token = &tokens[i];
 
             match token {
                 Token::Symbol('{') => {
-                    brace_depth += 1;
-                    if brace_depth <= 1 && test_scope_depth.is_none() {
-                        element_start_idx = i + 1;
-                    }
+                    block_stack.push(pending_block.unwrap_or(BlockType::Other));
+                    pending_block = None;
+                    in_signature = false;
+                    element_start_idx = i + 1;
                 }
                 Token::Symbol('}') => {
-                    if let Some(depth) = test_scope_depth {
-                        if brace_depth == depth + 1 {
-                            test_scope_depth = None;
-                        }
-                    }
-                    brace_depth = brace_depth.saturating_sub(1);
-                    if brace_depth <= 1 && test_scope_depth.is_none() {
-                        element_start_idx = i + 1;
-                    }
+                    block_stack.pop();
+                    pending_block = None;
+                    in_signature = false;
+                    element_start_idx = i + 1;
                 }
-                Token::Symbol(';') if brace_depth <= 1 && test_scope_depth.is_none() => {
+                Token::Symbol(';') => {
+                    pending_block = None;
+                    in_signature = false;
                     element_start_idx = i + 1;
                 }
                 Token::Ident(kw) => {
-                    let mut just_set_test_scope = false; // 🎯 INJECTION : Marqueur d'état immédiat
+                    // Préparation de la détection de déclaration structurelle
+                    let kw_block = match *kw {
+                        "mod" => Some(BlockType::Mod(String::new())),
+                        "impl" => Some(BlockType::Impl),
+                        "trait" => Some(BlockType::Trait),
+                        "fn" => Some(BlockType::Fn),
+                        "struct" => Some(BlockType::Struct),
+                        "enum" | "union" => Some(BlockType::Enum),
+                        "macro_rules" => Some(BlockType::Macro),
+                        _ => None,
+                    };
 
-                    if *kw == "mod" {
-                        let mut k = i + 1;
-                        while k < tokens.len() {
-                            match &tokens[k] {
-                                Token::Ident(n) if *n == "tests" => {
-                                    test_scope_depth = Some(brace_depth);
-                                    just_set_test_scope = true;
-                                    break;
-                                }
-                                Token::Whitespace(_) => k += 1,
-                                _ => break,
-                            }
+                    if let Some(b) = kw_block {
+                        if pending_block.is_none() {
+                            pending_block = Some(b);
                         }
                     }
 
-                    let is_target = match *kw {
-                        "struct" | "enum" | "impl" | "trait" | "type" | "macro_rules" => {
-                            brace_depth == 0 && test_scope_depth.is_none()
-                        }
-                        "mod" => {
-                            // 🎯 FIX : On cible le 'mod' même si on vient de basculer en mode test
-                            brace_depth == 0 && (test_scope_depth.is_none() || just_set_test_scope)
-                        }
-                        "fn" => {
-                            brace_depth <= 1
-                                || (test_scope_depth.is_some()
-                                    && brace_depth == test_scope_depth.unwrap() + 1)
-                        }
-                        _ => false,
-                    };
+                    // 🛡️ CONDITIONS DE RECURSIVITÉ (Option B) :
+                    // Un élément est tagable s'il se trouve à la racine, dans un mod, un impl ou un trait.
+                    // Si on est dans un `Fn` (fonction) ou `Other` (struct), on ignore ses enfants.
+                    let is_valid_parent = block_stack.is_empty()
+                        || matches!(
+                            block_stack.last().unwrap(),
+                            BlockType::Mod(_) | BlockType::Impl | BlockType::Trait
+                        );
+
+                    let is_target = !in_signature
+                        && match *kw {
+                            "struct" | "enum" | "impl" | "trait" | "type" | "macro_rules"
+                            | "mod" | "fn" => is_valid_parent,
+                            _ => false,
+                        };
 
                     if is_target {
+                        in_signature = true; // Empêche le taggage accidentel de l'intérieur de la signature (ex: impl Trait)
                         let mut name = String::new();
                         let mut k = i + 1;
 
@@ -795,7 +807,7 @@ impl Reconciler {
 
                             while k < tokens.len() {
                                 match &tokens[k] {
-                                    Token::Symbol('{') => break,
+                                    Token::Symbol('{') | Token::Symbol(';') => break,
                                     Token::Ident(n) => {
                                         if *n == "for" {
                                             has_for = true;
@@ -826,10 +838,20 @@ impl Reconciler {
                         }
 
                         if !name.is_empty() {
+                            // Si c'est un module, on stocke son nom pour la pile
+                            if *kw == "mod" {
+                                pending_block = Some(BlockType::Mod(name.clone()));
+                            }
+
+                            // 🎯 Traque dynamique du contexte de Test
+                            let in_test_scope = block_stack
+                                .iter()
+                                .any(|b| matches!(b, BlockType::Mod(m) if m == "tests"));
+
                             let mut tag_type = match *kw {
                                 "fn" => "fn",
                                 "struct" => "struct",
-                                "enum" => "enum",
+                                "enum" | "union" => "enum",
                                 "impl" => "impl",
                                 "trait" => "trait",
                                 "type" => "type",
@@ -838,9 +860,12 @@ impl Reconciler {
                                 _ => "unknown",
                             };
 
-                            if test_scope_depth.is_some() && *kw == "fn" {
+                            if in_test_scope && *kw == "fn" {
                                 tag_type = "test";
                             }
+
+                            let expected_tag_content =
+                                format!("// @raise-handle: {}:{}", tag_type, name);
 
                             let mut found_existing_tag = None;
                             for token in &tokens[element_start_idx..i] {
@@ -852,15 +877,11 @@ impl Reconciler {
                                 }
                             }
 
-                            let expected_tag_content =
-                                format!("// @raise-handle: {}:{}", tag_type, name);
-
                             if let Some(existing_c) = found_existing_tag {
                                 let offset =
                                     (existing_c.as_ptr() as usize) - (content.as_ptr() as usize);
                                 used_tags.insert(offset);
 
-                                // Si l'ancien tag (avec ou sans ID) est différent du nouveau tag pur, on le remplace.
                                 if existing_c != expected_tag_content {
                                     edits.push((offset, existing_c.len(), expected_tag_content));
                                 }
@@ -900,7 +921,6 @@ impl Reconciler {
                                 edits.push((offset, 0, expected_tag_with_newline));
                             }
                         }
-                        element_start_idx = i + 1;
                     }
                 }
                 _ => {}
@@ -1038,9 +1058,6 @@ fn trap() {
         assert!(el.body.as_deref().unwrap().contains("let c = '{';"));
     }
 
-    // 🎯 NOUVEAU TEST 1 : Robustesse face aux Raw Strings
-    // FIX de formatage : on utilise r##"..."## pour englober la string, car
-    // le code Rust simulé contient lui-même un r#"..."#.
     #[test]
     fn test_reconciler_zero_copy_raw_strings() {
         let code = r##"
@@ -1063,7 +1080,6 @@ fn raw_string_test() {
             .contains(r##"r#"(?x) { \d+ }"#"##));
     }
 
-    // 🎯 NOUVEAU TEST 2 : Robustesse intra-signature
     #[test]
     fn test_reconciler_comments_in_signature() {
         let code = r#"
@@ -1079,11 +1095,10 @@ pub fn with_comment(
         assert_eq!(elements.len(), 1);
 
         let el = &elements[0];
-        // Le parseur doit avoir ignoré le "/* identifiant de session */" lors de l'assemblage de la signature
         assert!(!el.signature.contains("identifiant de session"));
         assert_eq!(
             el.signature,
-            "pub fn with_comment(\n    \n    session_id: u32\n)" // La structure est préservée
+            "pub fn with_comment(\n    \n    session_id: u32\n)"
         );
     }
 
@@ -1095,7 +1110,6 @@ fn broken() {
     let a = 1;
 // Missing closing brace
 "#;
-        // 🎯 FIX : Ajout de l'ID obligatoire pour satisfaire la signature stricte
         let result = Reconciler::parse_content(code, "mod_test_broken".to_string());
 
         assert!(result.is_err(), "Devrait retourner une erreur RAISE");
@@ -1123,18 +1137,13 @@ mod tests {
 "#;
         let elements = Reconciler::parse_content(code, "test_module_id".to_string()).unwrap();
 
-        // On s'attend à récupérer exactement un élément principal
         assert_eq!(elements.len(), 1);
         let el = &elements[0];
 
-        // Vérification de la signature sémantique et du typage
         assert_eq!(el.handle, "mod:tests");
         assert_eq!(el.element_type, CodeElementType::TestModule);
-
-        // Vérification cruciale : l'attribut de compilation ne doit pas être perdu
         assert!(el.attributes.contains(&"#[cfg(test)]".to_string()));
 
-        // Vérification du corps extrait
         let body = el.body.as_deref().unwrap();
         assert!(body.contains("fn internal_test()"));
         assert!(body.contains("use super::*;"));
@@ -1142,7 +1151,6 @@ mod tests {
 
     #[async_test]
     async fn test_auto_tagger_injects_handle_on_test_module() {
-        // Simulation d'un fichier physique sans ancre sur son module de test
         let code = r#"
 fn core_logic() {}
 
@@ -1152,7 +1160,6 @@ mod tests {
     fn test_core() {}
 }
 "#;
-        // 🎯 FIX : Utilisation stricte de la façade fs et maintien du Guard TempDir
         let temp_dir_guard =
             crate::utils::io::fs::tempdir().expect("Impossible de créer le tempdir");
         let sandbox_dir = temp_dir_guard.path().join("raise_test_tagger");
@@ -1171,20 +1178,15 @@ mod tests {
             "path": path.to_string_lossy().to_string()
         });
 
-        // Exécution du Garbage Collector / Auto-tagger
         let edits_count = Reconciler::auto_tag_module(&mock_module_doc).await.unwrap();
 
-        // On s'attend à au moins une modification (injection du handle et du cartouche)
         assert!(edits_count > 0);
 
         let modified_code = crate::utils::io::fs::read_to_string_async(&path)
             .await
             .unwrap();
 
-        // Vérification de la bonne injection de l'ancre juste au-dessus du cfg(test)
         assert!(modified_code.contains("// @raise-handle: mod:tests\n#[cfg(test)]\nmod tests {"));
-
-        // Nettoyage implicite garanti par le trait Drop de temp_dir_guard à la fin de la portée
     }
 
     #[test]
@@ -1212,7 +1214,6 @@ mod tests {
 
         assert_eq!(el.handle, "mod:tests");
 
-        // Vérification de la remontée des dépendances dans les MÉTADONNÉES
         let imports = el
             .metadata
             .get("internal_imports")
@@ -1231,7 +1232,6 @@ mod tests {
             "La dépendance destructurée n'a pas été correctement formatée"
         );
 
-        // Vérification que le graphe strict n'a pas été pollué
         assert!(
             el.dependencies.is_empty(),
             "Le vecteur de dépendances sémantiques doit rester vierge"

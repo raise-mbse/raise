@@ -19,7 +19,7 @@ use self::reconcilers::markdown::DocReconciler;
 use self::reconcilers::rust::Reconciler as RustReconciler;
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::query::{Query, QueryEngine};
-use crate::utils::prelude::*; // 🎯 Façade Unique RAISE
+use crate::utils::prelude::*;
 
 #[derive(Clone, Debug)]
 pub struct SemanticRoute {

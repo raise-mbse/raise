@@ -1,8 +1,8 @@
 // @raise-cartouche-start
 // ==============================================================================
-// 🧬 MODULE SÉMANTIQUE : mod_kernel_environment_rs [id: cbfaeb2d-8fc5-4eea-95b6-e602b0fcf2b9]
+// 🧬 MODULE SÉMANTIQUE : mod_kernel_environment_rs [id: 117b486a-baee-4555-bca3-dd53d6e9d7dc]
 // 📁 CHEMIN PHYSIQUE   : crates/raise-core/src/kernel/environment.rs
-// 📅 SYNCHRONISATION   : 2026-06-09 08:16
+// 📅 SYNCHRONISATION   : 2026-06-15 08:01
 // 🤖 IA NOTE : Composant du Jumeau Numérique RAISE (Architecture Zéro Dette).
 // ⚠️ AUTO-GÉNÉRÉ : Les ancres sémantiques (@raise-handle) sont gérées par le CLI.
 // ==============================================================================

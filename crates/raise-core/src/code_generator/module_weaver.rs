@@ -337,9 +337,13 @@ impl ModuleWeaver {
 
     pub async fn weave_to_temp_file(module: &Module) -> RaiseResult<PathBuf> {
         let content = Self::weave_to_string(module)?;
-        let temp_dir = AppConfig::get()
-            .get_path("PATH_TMP_FILE")
-            .unwrap_or_else(|| os_temp_dir().join("raise_staging"));
+
+        // 🎯 ZÉRO DETTE : On cible directement le dossier parent du fichier final
+        let temp_dir = module
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
 
         if let Err(e) = fs::ensure_dir_async(&temp_dir).await {
             raise_error!(
@@ -356,7 +360,9 @@ impl ModuleWeaver {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unnamed_module".to_string());
 
-        let temp_path = temp_dir.join(format!("{}_{}", timestamp, file_name));
+        // 🎯 PRÉFIXE CACHÉ : On utilise un point (ex: .staging_12345_assets.rs)
+        // pour que le fichier soit ignoré par les IDE et les compilateurs pendant la transition
+        let temp_path = temp_dir.join(format!(".staging_{}_{}", timestamp, file_name));
 
         match fs::write_async(&temp_path, content.as_bytes()).await {
             Ok(_) => Ok(temp_path),

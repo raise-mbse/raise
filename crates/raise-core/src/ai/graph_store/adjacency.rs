@@ -3,6 +3,7 @@
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::utils::prelude::*; // 🎯 LA FAÇADE GLOBALE
 
+#[derive(Debug)]
 pub struct GraphAdjacency {
     pub uri_to_index: UnorderedMap<String, usize>,
     pub index_to_uri: Vec<String>,
@@ -50,14 +51,38 @@ impl GraphAdjacency {
             json_value!({ "nodes_count": n, "action": "build_sparse_topology" })
         );
 
-        // 🎯 L'ALLOCATION SPARSE : Au lieu de vec![0.0; n*n], on liste juste les liens existants.
         let mut src_indices: Vec<u32> = Vec::new();
         let mut dst_indices: Vec<u32> = Vec::new();
 
-        // Ajout des Self-loops obligatoires pour le GNN
+        // 🎯 DÉDUPLICATION : garde-fou contre les arêtes en double.
+        //
+        // Sans ce HashSet, deux situations produisent des doublons silencieux :
+        //   1. Un document contient une auto-référence dans ses relations
+        //      (ex: "realizes": [{ "@id": "la:F1" }] sur le nœud la:F1 lui-même)
+        //      → l'arête (i, i) serait ajoutée en plus du self-loop initial.
+        //   2. Une relation est déclarée dans les deux sens dans deux documents
+        //      distincts, ou une même relation apparaît sous deux clés différentes.
+        //
+        // Les arêtes dupliquées dans le format COO faussent l'agrégation des
+        // messages GNN : le nœud reçoit deux fois la contribution de son voisin,
+        // déséquilibrant l'espace latent sans signal d'erreur visible.
+        let mut seen_edges: std::collections::HashSet<(u32, u32)> =
+            std::collections::HashSet::new();
+
+        // Helper inliné pour insérer proprement sans dupliquer
+        macro_rules! push_edge {
+            ($src:expr, $dst:expr) => {
+                let pair = ($src as u32, $dst as u32);
+                if seen_edges.insert(pair) {
+                    src_indices.push(pair.0);
+                    dst_indices.push(pair.1);
+                }
+            };
+        }
+
+        // Self-loops obligatoires pour le GNN (agrégation du nœud lui-même)
         for i in 0..n {
-            src_indices.push(i as u32);
-            dst_indices.push(i as u32);
+            push_edge!(i, i);
         }
 
         let arcadia_relations = ["realizes", "allocatedTo", "subComponents", "involvedActors"];
@@ -71,15 +96,13 @@ impl GraphAdjacency {
                             for item in arr {
                                 if let Some(tid) = item.get("@id").and_then(|v| v.as_str()) {
                                     if let Some(&j) = uri_map.get(tid) {
-                                        src_indices.push(i as u32);
-                                        dst_indices.push(j as u32);
+                                        push_edge!(i, j);
                                     }
                                 }
                             }
                         } else if let Some(tid) = value.get("@id").and_then(|v| v.as_str()) {
                             if let Some(&j) = uri_map.get(tid) {
-                                src_indices.push(i as u32);
-                                dst_indices.push(j as u32);
+                                push_edge!(i, j);
                             }
                         }
                     }
@@ -111,7 +134,7 @@ impl GraphAdjacency {
 
         user_success!(
             "MSG_GNN_ADJACENCY_READY",
-            json_value!({ "nodes": n, "edges": edges_count, "format": "sparse_coo" })
+            json_value!({ "nodes": n, "edges": edges_count, "format": "sparse_coo_deduped" })
         );
 
         Ok(Self {
@@ -160,14 +183,115 @@ mod tests {
 
         let adj = GraphAdjacency::build_from_store(&manager, &ComputeHardware::Cpu).await?;
 
-        // 2 nœuds = 2 self-loops + 1 lien = 3 arêtes
         assert_eq!(adj.index_to_uri.len(), 2);
 
         let src_vec = match adj.edge_src.to_vec1::<u32>() {
             Ok(v) => v,
             Err(_) => panic!("Erreur conversion tenseur src"),
         };
-        assert_eq!(src_vec.len(), 3, "Il devrait y avoir 3 arêtes (COO format)");
+        // 2 nœuds = 2 self-loops + 1 lien (la:F1 → sa:S1) = 3 arêtes
+        assert_eq!(
+            src_vec.len(),
+            3,
+            "Il devrait y avoir 3 arêtes (COO dédupliqué)"
+        );
+
+        Ok(())
+    }
+
+    /// Vérifie qu'une auto-référence dans les relations ne produit pas de self-loop dupliqué.
+    #[async_test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
+    async fn test_adjacency_no_duplicate_on_self_reference() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let config = AppConfig::get();
+
+        let manager = CollectionsManager::new(
+            &sandbox.db,
+            &config.mount_points.system.domain,
+            &config.mount_points.system.db,
+        );
+        DbSandbox::mock_db(&manager).await?;
+
+        let schema_uri = format!(
+            "db://{}/{}/schemas/v1/db/generic.schema.json",
+            config.mount_points.system.domain, config.mount_points.system.db
+        );
+        manager.create_collection("la", &schema_uri).await?;
+
+        // Document qui se référence lui-même via "subComponents"
+        let doc = json_value!({
+            "_id": "F1",
+            "@id": "la:F1",
+            "subComponents": [{ "@id": "la:F1" }]
+        });
+        manager.insert_raw("la", &doc).await?;
+
+        let adj = GraphAdjacency::build_from_store(&manager, &ComputeHardware::Cpu).await?;
+
+        let src_vec = match adj.edge_src.to_vec1::<u32>() {
+            Ok(v) => v,
+            Err(_) => panic!("Erreur conversion tenseur src"),
+        };
+
+        // 1 nœud = exactement 1 self-loop, même si le document se pointe lui-même
+        assert_eq!(
+            src_vec.len(), 1,
+            "L'auto-référence documentaire ne doit pas dupliquer le self-loop : attendu 1, obtenu {}",
+            src_vec.len()
+        );
+
+        Ok(())
+    }
+
+    /// Vérifie qu'une même relation déclarée en double dans un document ne produit qu'une arête.
+    #[async_test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
+    async fn test_adjacency_no_duplicate_on_repeated_relation() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let config = AppConfig::get();
+
+        let manager = CollectionsManager::new(
+            &sandbox.db,
+            &config.mount_points.system.domain,
+            &config.mount_points.system.db,
+        );
+        DbSandbox::mock_db(&manager).await?;
+
+        let schema_uri = format!(
+            "db://{}/{}/schemas/v1/db/generic.schema.json",
+            config.mount_points.system.domain, config.mount_points.system.db
+        );
+        manager.create_collection("la", &schema_uri).await?;
+        manager.create_collection("sa", &schema_uri).await?;
+
+        // La relation vers sa:S1 est listée deux fois
+        let doc = json_value!({
+            "_id": "F1",
+            "@id": "la:F1",
+            "realizes": [{ "@id": "sa:S1" }, { "@id": "sa:S1" }]
+        });
+        manager.insert_raw("la", &doc).await?;
+        manager
+            .insert_raw("sa", &json_value!({ "_id": "S1", "@id": "sa:S1" }))
+            .await?;
+
+        let adj = GraphAdjacency::build_from_store(&manager, &ComputeHardware::Cpu).await?;
+
+        let src_vec = match adj.edge_src.to_vec1::<u32>() {
+            Ok(v) => v,
+            Err(_) => panic!("Erreur conversion tenseur src"),
+        };
+
+        // 2 nœuds = 2 self-loops + 1 seule arête (la:F1 → sa:S1), pas 2
+        assert_eq!(
+            src_vec.len(),
+            3,
+            "La relation dupliquée ne doit produire qu'une seule arête : attendu 3, obtenu {}",
+            src_vec.len()
+        );
 
         Ok(())
     }

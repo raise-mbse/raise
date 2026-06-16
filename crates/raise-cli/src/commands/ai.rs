@@ -5,8 +5,10 @@ use raise_core::{user_error, user_info, user_success, utils::prelude::*};
 
 // --- IMPORTS MÉTIER RAISE ---
 use raise_core::ai::agents::intent_classifier::{EngineeringIntent, IntentClassifier};
+use raise_core::ai::agents::software_agent::SoftwareAgent;
 use raise_core::ai::agents::tools::query_knowledge_graph;
 use raise_core::ai::agents::{dynamic_agent::DynamicAgent, Agent, AgentContext};
+
 use raise_core::json_db::collections::manager::CollectionsManager;
 
 use raise_core::ai::context::rag::RagRetriever;
@@ -143,6 +145,17 @@ pub enum AiCommands {
     /// 🩺 Afficher l'état de santé du moteur IA (Hardware, Assets)
     #[command(visible_alias = "h")]
     Health,
+
+    /// 🧬 Muter un composant de code via l'IA
+    #[command(visible_alias = "m")]
+    Mutate {
+        /// Le handle sémantique cible (ex: fn:missing_file_context)
+        #[arg(long)]
+        handle: String,
+        /// L'instruction de mutation
+        #[arg(long)]
+        prompt: String,
+    },
 
     #[command(visible_alias = "a-check")]
     Audit {
@@ -468,6 +481,70 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
         } => {
             run_execute_action(&ctx, client, &prompt_handle, vars, out, ingest).await?;
         }
+
+        AiCommands::Mutate { handle, prompt } => {
+            user_info!(
+                "AI_MUTATION_INIT",
+                json_value!({"target": handle, "instruction": prompt})
+            );
+
+            // 1. Forger l'intention
+            let intent = EngineeringIntent::MutateCode {
+                module_name: "auto".to_string(),
+                target_handle: handle.clone(),
+                instruction: prompt.clone(),
+            };
+
+            // 2. Initialiser les dépendances requises par l'AgentContext
+            let manager = CollectionsManager::new(&ctx.storage, &ctx.active_domain, &ctx.active_db);
+
+            // 🎯 FIX DU GATEKEEPER : On passe le moteur natif chargé par le Kernel !
+            // (⚠️ Note : Adaptez `llm_native` si le champ porte un autre nom dans votre RaiseKernelState)
+            let native_engine = ctx.kernel.native_llm.clone();
+
+            let llm = LlmClient::new(&manager, ctx.storage.clone(), native_engine).await?;
+
+            // Instanciation du moteur Neuro-Symbolique
+            let world_engine =
+                raise_core::ai::world_model::NeuroSymbolicEngine::bootstrap(&manager).await?;
+            let world_engine_ref = SharedRef::new(world_engine);
+
+            // 3. Générer un identifiant de session CLI unique
+            let session_id = format!("cli_session_{}", ctx.active_user);
+
+            // 4. Préparer le contexte d'exécution
+            let agent_ctx = AgentContext::new(
+                "agent_software",
+                &session_id,
+                ctx.storage.clone(),
+                llm,
+                world_engine_ref,
+                raise_core::utils::data::config::AppConfig::get()
+                    .get_path("PATH_RAISE_DOMAIN")
+                    .unwrap_or_default(),
+                std::path::PathBuf::new(),
+            )
+            .await?;
+
+            // 5. Invoquer le Software Agent spécialisé (L'Architecte Code)
+            let agent = SoftwareAgent::new(ctx.active_domain.clone(), ctx.active_db.clone());
+
+            // 6. Exécution de la mutation (RAG -> LLM -> Validation Schema -> Staging)
+            let result = agent.process(&agent_ctx, &intent).await?;
+
+            if let Some(res) = result {
+                user_success!(
+                    "AI_MUTATION_SUCCESS",
+                    json_value!({"message": res.message, "artifacts": res.artifacts.len()})
+                );
+            } else {
+                user_warn!(
+                    "AI_MUTATION_SKIPPED",
+                    json_value!({"reason": "L'agent n'a rien retourné."})
+                );
+            }
+        }
+
         _ => unreachable!(),
     }
 

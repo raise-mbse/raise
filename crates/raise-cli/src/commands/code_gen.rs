@@ -16,6 +16,7 @@ pub struct CodeGenArgs {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum CodeGenCommands {
+    InitSandbox,
     Generate {
         element_id: String,
         #[arg(short, long, value_enum)]
@@ -70,6 +71,10 @@ pub async fn handle(args: CodeGenArgs, ctx: CliContext) -> RaiseResult<()> {
     let _ = ctx.session_mgr.touch().await;
 
     match args.command {
+        CodeGenCommands::InitSandbox => {
+            codegen_service::init_sandbox_workspace().await?;
+        }
+
         CodeGenCommands::Generate {
             element_id,
             lang,
@@ -119,6 +124,7 @@ pub async fn handle(args: CodeGenArgs, ctx: CliContext) -> RaiseResult<()> {
                 &ctx.active_domain,
                 &ctx.active_db,
                 &ctx.storage,
+                ctx.is_test_mode,
             )
             .await
             {

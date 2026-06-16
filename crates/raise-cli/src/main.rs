@@ -264,8 +264,8 @@ fn main() -> RaiseResult<()> {
             active_user,
             active_domain,
             active_db,
-            is_test_mode: false,
-            is_simulation: false,
+            is_test_mode: cli.simulate,
+            is_simulation: cli.simulate,
             sim_domain,
             sim_db,
         };

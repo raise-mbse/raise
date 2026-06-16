@@ -92,7 +92,7 @@ pub async fn train_gnn_step(
         };
 
     let features = GraphFeatures::build_from_vectors(vectors, device).await?;
-    let loss = engine.train_step(&features.matrix, &adj, lambda).await?;
+    let loss = engine.train_step(&features.matrix, lambda).await?;
 
     Ok(loss)
 }
@@ -129,7 +129,7 @@ pub async fn audit_ontology(
         };
 
     let features = GraphFeatures::build_from_vectors(vectors, device).await?;
-    let reports = engine.audit_ontology(&features.matrix, &adj).await?;
+    let reports = engine.audit_ontology(&features.matrix).await?;
 
     Ok(reports)
 }

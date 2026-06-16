@@ -102,5 +102,14 @@ pub async fn auto_tag_module(
     storage: State<'_, SharedRef<StorageEngine>>,
 ) -> RaiseResult<usize> {
     let (domain, db) = get_active_context(&state).await;
-    codegen_service::auto_tag_module(&module_handle, &domain, &db, storage.inner().as_ref()).await
+
+    // 🎯 FIX : Ajout du paramètre `false` (is_test_mode) manquant dans l'appel
+    codegen_service::auto_tag_module(
+        &module_handle,
+        &domain,
+        &db,
+        storage.inner().as_ref(),
+        false,
+    )
+    .await
 }

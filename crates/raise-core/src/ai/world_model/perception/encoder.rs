@@ -11,6 +11,84 @@ const LAYER_DIM: usize = 8;
 /// Component, Function, Actor, Exchange, Interface, Data, Capability, Other -> 8 dimensions
 const CATEGORY_DIM: usize = 8;
 
+/// Encodeur Hybride (Stateful) : Fusionne la Topologie MBSE (One-Hot) et la Sémantique NLP (Dense).
+pub struct HybridEncoder {
+    /// Couche de projection pour réduire l'embedding NLP (ex: 384 -> 16)
+    pub semantic_proj: NeuralLinearLayer,
+    pub structural_dim: usize,
+    pub semantic_dim: usize,
+}
+
+impl HybridEncoder {
+    /// Initialise l'encodeur hybride avec ses poids entraînables.
+    /// * `nlp_dim` : Dimension de sortie du modèle FastEmbed (ex: 384 pour BGE-Small).
+    /// * `semantic_dim` : Dimension compressée cible (ex: 16, pour équilibrer avec les 16 dims structurelles).
+    pub fn new(
+        nlp_dim: usize,
+        semantic_dim: usize,
+        vb: NeuralWeightsBuilder<'_>,
+    ) -> RaiseResult<Self> {
+        let semantic_proj = match init_linear_layer(nlp_dim, semantic_dim, vb.pp("semantic_proj")) {
+            Ok(layer) => layer,
+            Err(e) => raise_error!(
+                "ERR_AI_HYBRID_ENCODER_INIT",
+                error = e.to_string(),
+                context = json_value!({ "nlp_dim": nlp_dim, "semantic_dim": semantic_dim })
+            ),
+        };
+
+        Ok(Self {
+            semantic_proj,
+            structural_dim: LAYER_DIM + CATEGORY_DIM, // 16
+            semantic_dim,
+        })
+    }
+
+    /// Encode un élément en fusionnant sa nature structurelle et son sens NLP.
+    /// Retourne un tenseur de dimension [1, structural_dim + semantic_dim].
+    pub fn encode_hybrid(
+        &self,
+        element: &ArcadiaElement,
+        nlp_embedding: &[f32], // Le vecteur issu de fast.rs (FastEmbedEngine)
+        device: &ComputeHardware,
+    ) -> RaiseResult<NeuralTensor> {
+        // 1. Perception Structurelle Pure (Zéro Dette) -> [1, 16]
+        let t_structure = ArcadiaEncoder::encode_element(element)?;
+
+        // 2. Conversion du vecteur NLP en Tenseur -> [1, 384]
+        let nlp_dim = nlp_embedding.len();
+        let t_nlp = match NeuralTensor::from_vec(nlp_embedding.to_vec(), (1, nlp_dim), device) {
+            Ok(t) => t,
+            Err(e) => raise_error!("ERR_AI_HYBRID_TENSOR_ALLOC", error = e.to_string()),
+        };
+
+        // 3. Projection Sémantique -> [1, 16]
+        let t_semantic_raw = match self.semantic_proj.forward(&t_nlp) {
+            Ok(t) => t,
+            Err(e) => raise_error!("ERR_AI_HYBRID_PROJECTION", error = e.to_string()),
+        };
+
+        // 4. Activation Non-Linéaire (GELU) pour extraire les features complexes
+        let t_semantic = match NeuralActivation::Gelu.forward(&t_semantic_raw) {
+            Ok(t) => t,
+            Err(e) => raise_error!("ERR_AI_HYBRID_ACTIVATION", error = e.to_string()),
+        };
+
+        // 5. Fusion finale (Concaténation sur la dimension 1) -> [1, 32]
+        match NeuralTensor::cat(&[&t_structure, &t_semantic], 1) {
+            Ok(t_combined) => Ok(t_combined),
+            Err(e) => raise_error!(
+                "ERR_AI_HYBRID_FUSION",
+                error = e.to_string(),
+                context = json_value!({
+                    "struct_shape": format!("{:?}", t_structure.shape()),
+                    "semantic_shape": format!("{:?}", t_semantic.shape())
+                })
+            ),
+        }
+    }
+}
+
 /// Encodeur sans état (Stateless) pour transformer les concepts Arcadia en Tenseurs.
 pub struct ArcadiaEncoder;
 
@@ -160,6 +238,33 @@ mod tests {
         assert_eq!(
             vec[8], 1.0,
             "Category index 0 (Component) décalé de 8 doit être 1.0"
+        );
+    }
+
+    #[test]
+    fn test_hybrid_encoder_fusion() {
+        let device = ComputeHardware::Cpu;
+        let varmap = NeuralWeightsMap::new();
+        let vb = NeuralWeightsBuilder::from_varmap(&varmap, ComputeType::F32, &device);
+
+        // nlp_dim = 384 (FastEmbed), semantic_dim = 16
+        let hybrid_encoder = HybridEncoder::new(384, 16, vb).unwrap();
+
+        let el = make_element("https://raise.io/ontology/arcadia/la#LogicalFunction");
+
+        // Mock d'un vecteur NLP issu de fast.rs
+        let mock_nlp_vec = vec![0.5f32; 384];
+
+        let combined_tensor = hybrid_encoder
+            .encode_hybrid(&el, &mock_nlp_vec, &device)
+            .unwrap();
+        let dims = combined_tensor.dims();
+
+        // Vérification de la dimension : [Batch=1, Features = 16 (Struct) + 16 (NLP) = 32]
+        assert_eq!(
+            dims,
+            &[1, 32],
+            "Le tenseur hybride doit faire 32 dimensions."
         );
     }
 }

@@ -7,6 +7,7 @@ use crate::ai::context::{
 use crate::ai::llm::client::{LlmBackend, LlmClient, LlmEngine};
 use crate::ai::nlp::parser::CommandType;
 use crate::ai::world_model::engine::WorldModelConfig;
+use crate::ai::world_model::perception::encoder::HybridEncoder; // 🎯 Import du nouvel encodeur
 use crate::ai::world_model::{NeuroSymbolicEngine, WorldAction, WorldTrainer};
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::storage::StorageEngine;
@@ -28,6 +29,7 @@ pub struct AiOrchestrator {
     pub session: ConversationSession,
     pub memory_store: MemoryStore,
     pub world_engine: SharedRef<NeuroSymbolicEngine>,
+    pub hybrid_encoder: HybridEncoder, // 🎯 Ajout de l'encodeur hybride
 
     pub space: String,
     pub db_name: String,
@@ -48,29 +50,83 @@ impl AiOrchestrator {
         // 2. Client LLM Distant (Fallback)
         let llm_remote = LlmClient::new(manager, storage.clone(), native_llm.clone()).await?;
 
-        // 3. World Model (Neuro-Symbolique)
+        // 3. World Model (Neuro-Symbolique) avec AUTO-HEALING (Zéro Dette)
         let world_engine = match NeuroSymbolicEngine::bootstrap(manager).await {
-            Ok(engine) => engine,
+            Ok(engine) => {
+                // 🎯 AUTO-HEALING : Si l'ancien cerveau était dimensionné à 16,
+                // il est obsolète face à notre nouvel HybridEncoder (32). On le recrée.
+                if engine.config.embedding_dim != 32 {
+                    crate::user_warn!(
+                        "WRN_OBSOLETE_BRAIN",
+                        json_value!({"msg": "Ancien modèle détecté. Recréation en 32 dimensions pour supporter le NLP."})
+                    );
+                    let mut cfg = engine.config.clone();
+                    cfg.embedding_dim = 32;
+                    NeuroSymbolicEngine::new_empty(cfg)?
+                } else {
+                    engine
+                }
+            }
             Err(e) => {
-                user_warn!(
+                crate::user_warn!(
                     "WRN_WORLD_MODEL_LOAD_FAILED",
                     json_value!({ "error": e.to_string(), "hint": "Démarrage avec un modèle vierge." })
                 );
-                let wm_settings = AppConfig::get_runtime_settings(
+
+                // Récupération de la config mockée/locale avec sécurisation
+                // Récupération de la config mockée/locale avec sécurisation
+                let wm_config = match AppConfig::get_runtime_settings(
                     manager,
                     "ref:components:handle:ai_world_model",
                 )
-                .await?;
-                let wm_config: WorldModelConfig = json::deserialize_from_value(wm_settings)?;
+                .await
+                {
+                    Ok(settings) => {
+                        // 🎯 FIX CLIPPY : unwrap_or au lieu de unwrap_or_else
+                        let mut cfg: WorldModelConfig = json::deserialize_from_value(settings)
+                            .unwrap_or(WorldModelConfig {
+                                vocab_size: 1000,
+                                embedding_dim: 32,
+                                action_dim: 5,
+                                hidden_dim: 64,
+                                use_gpu: false,
+                            });
+                        // 🎯 AUTO-HEALING : On écrase la config de test obsolète
+                        if cfg.embedding_dim != 32 {
+                            cfg.embedding_dim = 32;
+                        }
+                        cfg
+                    }
+                    Err(_) => WorldModelConfig {
+                        vocab_size: 1000,
+                        embedding_dim: 32,
+                        action_dim: 5,
+                        hidden_dim: 64,
+                        use_gpu: false,
+                    },
+                };
+
                 NeuroSymbolicEngine::new_empty(wm_config)?
             }
+        };
+
+        // 🎯 Initialisation de l'HybridEncoder (On lie ses poids à la varmap du WorldModel !)
+        let vb = NeuralWeightsBuilder::from_varmap(
+            &world_engine.varmap,
+            ComputeType::F32,
+            &ComputeHardware::Cpu,
+        );
+
+        let hybrid_encoder = match HybridEncoder::new(384, 16, vb) {
+            Ok(enc) => enc,
+            Err(e) => raise_error!("ERR_HYBRID_ENCODER_INIT", error = e.to_string()),
         };
 
         // 4. Mémoire conversationnelle
         let memory_store = MemoryStore::new(manager).await?;
         let session = memory_store.load_or_create(manager, "main_session").await?;
 
-        user_info!(
+        crate::user_info!(
             "MSG_ORCHESTRATOR_INIT_SUCCESS",
             json_value!({
                 "native_llm_attached": native_llm.is_some(),
@@ -86,6 +142,7 @@ impl AiOrchestrator {
             session,
             memory_store,
             world_engine: SharedRef::new(world_engine),
+            hybrid_encoder, // 🎯 Injection validée
             space: manager.space.to_string(),
             db_name: manager.db.to_string(),
             storage,
@@ -104,7 +161,6 @@ impl AiOrchestrator {
             &app_config.mount_points.system.db,
         );
 
-        // Utilisation de llm_remote au lieu de l'ancien 'llm'
         let classifier = IntentClassifier::new(self.llm_remote.clone());
         let mut current_intent = classifier.classify(user_query).await;
         let mut current_agent_urn = current_intent.recommended_agent_id().to_string();
@@ -113,7 +169,6 @@ impl AiOrchestrator {
         let global_session_id =
             AgentContext::generate_default_session_id("orchestrator", session_scope)?;
 
-        // Résolution déterministe des chemins via AppConfig
         let domain_path = match app_config.get_path("PATH_RAISE_DOMAIN") {
             Some(p) => p,
             None => raise_error!(
@@ -185,7 +240,6 @@ impl AiOrchestrator {
             &app_config.mount_points.system.db,
         );
 
-        // Récupération de contexte
         let rag_ctx = self
             .rag
             .retrieve(&manager, query, 3)
@@ -198,7 +252,6 @@ impl AiOrchestrator {
             arcadia_ctx, rag_ctx, query
         );
 
-        // STRATÉGIE HYBRIDE
         let response = if let Some(ref shared_llm) = self.llm_native {
             let mut llm = shared_llm.lock().await;
             llm.generate("Tu es un expert Arcadia.", &prompt, 512)
@@ -223,6 +276,20 @@ impl AiOrchestrator {
         Ok(response)
     }
 
+    /// 🎯 Extrait l'embedding NLP d'un élément (ou retourne un tenseur neutre Zéro Dette)
+    pub async fn get_cached_embedding(&self, element: &ArcadiaElement) -> RaiseResult<Vec<f32>> {
+        if let Some(val) = element.properties.get("nlp_embedding") {
+            if let Ok(vec) = json::deserialize_from_value::<Vec<f32>>(val.clone()) {
+                if vec.len() == 384 {
+                    return Ok(vec);
+                }
+            }
+        }
+        // Fallback sûr : Un tenseur de zéros (384 dimensions pour BGE-Small)
+        // Permet au système de tourner même sur des bases de données fraîchement importées
+        Ok(vec![0.0f32; 384])
+    }
+
     /// Apprentissage par renforcement du World Model Arcadia.
     pub async fn reinforce_learning(
         &self,
@@ -230,13 +297,33 @@ impl AiOrchestrator {
         intent: CommandType,
         state_after: &ArcadiaElement,
     ) -> RaiseResult<f64> {
+        let device = ComputeHardware::Cpu;
+
+        // 1. Récupération des embeddings NLP mis en cache
+        let nlp_before = self.get_cached_embedding(state_before).await?;
+        let nlp_after = self.get_cached_embedding(state_after).await?;
+
+        // 2. Encodage Hybride (Struct + NLP)
+        let tensor_before =
+            self.hybrid_encoder
+                .encode_hybrid(state_before, &nlp_before, &device)?;
+        let tensor_after = self
+            .hybrid_encoder
+            .encode_hybrid(state_after, &nlp_after, &device)?;
+
+        // 3. Transformation de l'action
+        let action_obj = WorldAction { intent };
+        let action_tensor = action_obj.to_tensor(self.world_engine.config.action_dim)?;
+
+        // 4. Entraînement Mathématique Pur (Totalement agnostique)
         let mut trainer = match WorldTrainer::new(&self.world_engine, 0.01) {
             Ok(t) => t,
             Err(e) => raise_error!("ERR_WM_TRAINER_INIT", error = e.to_string()),
         };
 
-        let loss = trainer.train_step(state_before, WorldAction { intent }, state_after)?;
+        let loss = trainer.train_step(&tensor_before, &action_tensor, &tensor_after)?;
 
+        // 5. Persistance du World Model mis à jour
         let manager = CollectionsManager::new(self.storage.as_ref(), &self.space, &self.db_name);
         match self.world_engine.save(&manager).await {
             Ok(_) => (),
@@ -314,8 +401,6 @@ mod tests {
             &config.mount_points.system.db,
         );
 
-        // L'injection de la stack IA se fait désormais automatiquement via le sandbox !
-
         // 1. TEST D'INITIALISATION RÉSILIENTE
         let mut orch =
             AiOrchestrator::new(ProjectModel::default(), &manager, sandbox.db.clone(), None)
@@ -354,8 +439,6 @@ mod tests {
             &config.mount_points.system.db,
         );
 
-        // L'injection de la stack IA se fait désormais automatiquement via le sandbox !
-
         // Création d'un fichier Safetensors invalide (corrompu)
         let wm_dir = sandbox
             .db
@@ -368,7 +451,6 @@ mod tests {
         fs::ensure_dir_async(&wm_dir).await?;
         fs::write_async(wm_dir.join("world_model.safetensors"), b"CORRUPTED_DATA").await?;
 
-        // L'orchestrateur doit détecter l'erreur, logger un Warning, et s'initialiser avec un modèle vierge
         let orch = AiOrchestrator::new(ProjectModel::default(), &manager, sandbox.db.clone(), None)
             .await?;
         assert!(orch.world_engine.config.vocab_size > 0);

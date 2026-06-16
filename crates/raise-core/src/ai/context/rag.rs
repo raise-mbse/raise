@@ -31,7 +31,7 @@ impl RagRetriever {
         // 🎯 GOUVERNANCE STRICTE : Vérification de l'activation du composant RAG
         let _settings = match AppConfig::get_runtime_settings(
             manager,
-            "ref:components:handle:context_rag",
+            "ref:components:handle:ai_context",
         )
         .await
         {
@@ -237,7 +237,7 @@ mod tests {
                 "components",
                 json_value!({
                     "_id": "comp_rag_id",
-                    "handle": "context_rag",
+                    "handle": "ai_context",
                     "name": "RAG Engine"
                 }),
             )
@@ -266,7 +266,7 @@ mod tests {
                 "service_configs",
                 json_value!({
                     "_id": "mock_rag_cfg",
-                    "component_id": "ref:components:handle:context_rag",
+                    "component_id": "ref:components:handle:ai_context",
                     "service_settings": {
                         "collection_name": "raise_knowledge_base"
                     }

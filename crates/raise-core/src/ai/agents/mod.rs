@@ -4,6 +4,7 @@ pub mod context;
 pub mod dynamic_agent;
 pub mod intent_classifier;
 pub mod prompt_engine;
+pub mod software_agent;
 pub mod tools;
 
 pub use self::context::AgentContext;

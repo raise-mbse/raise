@@ -2,11 +2,10 @@
 
 use crate::utils::prelude::*;
 
-use crate::ai::world_model::engine::{NeuroSymbolicEngine, WorldAction};
-use crate::ai::world_model::perception::ArcadiaEncoder;
-use crate::model_engine::types::ArcadiaElement;
+use crate::ai::world_model::engine::NeuroSymbolicEngine;
 
 /// Le Coach du World Model.
+/// Totalement découplé de la logique métier (Arcadia). Il ne manipule que des tenseurs latents.
 pub struct WorldTrainer<'a> {
     engine: &'a NeuroSymbolicEngine,
     opt: NeuralOptimizerAdamW,
@@ -31,7 +30,7 @@ impl<'a> WorldTrainer<'a> {
                     context = json_value!({
                         "learning_rate": lr,
                         "variable_count": engine.varmap.all_vars().len(),
-                        "hint": "Échec de l'initialisation du NeuralOptimizerAdamW. Vérifiez que le Varmap contient des variables entraînables valides."
+                        "hint": "Échec de l'initialisation du NeuralOptimizerAdamW."
                     })
                 )
             }
@@ -40,28 +39,40 @@ impl<'a> WorldTrainer<'a> {
         Ok(Self { engine, opt })
     }
 
+    /// Exécute une étape d'apprentissage par renforcement (Backpropagation).
+    /// * `state_t_tensor` : L'état initial fusionné [1, 32] (Structure + NLP)
+    /// * `action_tensor` : L'action encodée en One-Hot [1, Action_Dim]
+    /// * `target_t1_tensor` : L'état futur réel fusionné [1, 32] (Structure + NLP)
     pub fn train_step(
         &mut self,
-        state_t: &ArcadiaElement,
-        action: WorldAction,
-        state_t1_actual: &ArcadiaElement,
+        state_t_tensor: &NeuralTensor,
+        action_tensor: &NeuralTensor,
+        target_t1_tensor: &NeuralTensor,
     ) -> RaiseResult<f64> {
-        // 1. Inférence et Préparation des Cibles
-        let predicted_tensor = self.engine.simulate(state_t, action)?;
-        let raw_t1 = ArcadiaEncoder::encode_element(state_t1_actual)?;
-        let token_t1 = self.engine.quantizer.tokenize(&raw_t1)?;
-        let target_tensor = self.engine.quantizer.decode(&token_t1)?.detach();
+        // 1. Quantization de l'état initial (Discrétisation façon VQ-VAE)
+        let token_t = self.engine.quantizer.tokenize(state_t_tensor)?;
+        let state_quantized = self.engine.quantizer.decode(&token_t)?;
 
-        // 2. Calcul de la Perte (MSE Loss)
-        // On sépare pour identifier si c'est la soustraction ou le carré qui échoue
-        let diff = match predicted_tensor.sub(&target_tensor) {
+        // 2. Inférence (Prédiction de l'état futur)
+        let predicted_tensor = self
+            .engine
+            .predictor
+            .forward(&state_quantized, action_tensor)?;
+
+        // 3. Préparation de la cible réelle (Target)
+        // On passe la cible réelle dans le quantizer pour obtenir sa représentation latente exacte
+        let token_t1 = self.engine.quantizer.tokenize(target_t1_tensor)?;
+        let target_latent = self.engine.quantizer.decode(&token_t1)?.detach();
+
+        // 4. Calcul de la Perte (MSE Loss)
+        let diff = match predicted_tensor.sub(&target_latent) {
             Ok(d) => d,
             Err(e) => raise_error!(
                 "ERR_AI_LOSS_SUB_FAILED",
                 error = e,
                 context = json_value!({
                     "pred_shape": format!("{:?}", predicted_tensor.shape()),
-                    "target_shape": format!("{:?}", target_tensor.shape())
+                    "target_shape": format!("{:?}", target_latent.shape())
                 })
             ),
         };
@@ -74,18 +85,13 @@ impl<'a> WorldTrainer<'a> {
             Err(e) => raise_error!("ERR_AI_LOSS_SQR_FAILED", error = e),
         };
 
-        // 3. Rétropropagation (Backprop)
-        // C'est l'étape la plus critique où les gradients sont calculés
+        // 5. Rétropropagation (Backprop)
         match self.opt.backward_step(&loss) {
             Ok(_) => (),
-            Err(e) => raise_error!(
-                "ERR_AI_BACKPROP_FAILED",
-                error = e,
-                context = json_value!({ "hint": "Vérifiez si certains gradients sont devenus NaN ou si le graphe de calcul a été rompu." })
-            ),
+            Err(e) => raise_error!("ERR_AI_BACKPROP_FAILED", error = e),
         };
 
-        // 4. Extraction de la valeur scalaire
+        // 6. Extraction de la valeur scalaire
         let scalar_loss = match loss.to_scalar::<f32>() {
             Ok(val) => val as f64,
             Err(e) => raise_error!("ERR_AI_LOSS_SCALAR_CONVERSION_FAILED", error = e),
@@ -98,60 +104,50 @@ impl<'a> WorldTrainer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::nlp::parser::CommandType;
     use crate::ai::world_model::engine::WorldModelConfig;
-    use crate::model_engine::types::NameType;
-
-    fn make_dummy(id: &str, layer_idx: usize) -> ArcadiaElement {
-        let kind = match layer_idx {
-            // CORRECTION : Utilisation des URIs officielles
-            0 => "https://raise.io/ontology/arcadia/oa#OperationalActivity",
-            _ => "https://raise.io/ontology/arcadia/la#LogicalFunction",
-        };
-
-        ArcadiaElement {
-            id: id.to_string(),
-            name: NameType::default(),
-            kind: kind.to_string(),
-            properties: UnorderedMap::new(),
-        }
-    }
 
     #[test]
     #[serial_test::serial]
     #[cfg_attr(not(feature = "cuda"), ignore)]
-    fn test_training_loop_convergence() {
+    fn test_training_loop_convergence_tensors() {
         // 1. Setup
+        let device = ComputeHardware::Cpu;
         let varmap = NeuralWeightsMap::new();
 
-        // Création de la config pour l'entraînement
+        // Config adaptée à l'encodeur Hybride : embedding_dim = 32 (16 Struct + 16 NLP)
         let config = WorldModelConfig {
             vocab_size: 10,
-            embedding_dim: 16, // Aligné avec l'encodeur V2
+            embedding_dim: 32,
             action_dim: 5,
-            hidden_dim: 32,
+            hidden_dim: 64,
             use_gpu: false,
         };
 
-        // 1 Initialisation via la config
-        let engine = NeuroSymbolicEngine::new(config, varmap).unwrap();
-
-        // 2. Trainer
+        let engine = NeuroSymbolicEngine::new(config.clone(), varmap).unwrap();
         let mut trainer = WorldTrainer::new(&engine, 0.05).unwrap();
 
-        // 3. Données fictives
-        let state_t = make_dummy("obs_1", 0);
-        let state_t1 = make_dummy("obs_2", 2);
+        // 2. Création de tenseurs factices (Mock) pour simuler la sortie de l'HybridEncoder
+        // Plus besoin de dépendre de `ArcadiaElement` !
+        let state_t = NeuralTensor::randn(0.0f32, 1.0f32, (1, 32), &device).unwrap();
+        let state_t1 = NeuralTensor::randn(0.0f32, 1.0f32, (1, 32), &device).unwrap();
 
-        // 4. Boucle d'entraînement
+        // Mock de l'action (One-hot pour l'index 0)
+        // 🎯 FIX : Forcer le type f32 pour correspondre aux tenseurs d'état
+        let action_tensor = NeuralTensor::from_vec(
+            vec![1.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32],
+            (1, 5),
+            &device,
+        )
+        .unwrap();
+
+        // 3. Boucle d'entraînement
         let mut initial_loss = 0.0;
         let mut final_loss = 0.0;
 
         for i in 0..50 {
-            let action = WorldAction {
-                intent: CommandType::Create,
-            };
-            let loss = trainer.train_step(&state_t, action, &state_t1).unwrap();
+            let loss = trainer
+                .train_step(&state_t, &action_tensor, &state_t1)
+                .unwrap();
 
             if i == 0 {
                 initial_loss = loss;
@@ -160,6 +156,9 @@ mod tests {
         }
 
         println!("Initial Loss: {}, Final Loss: {}", initial_loss, final_loss);
-        assert!(final_loss < initial_loss, "Le modèle n'a pas appris !");
+        assert!(
+            final_loss < initial_loss,
+            "Le modèle n'a pas appris sur les tenseurs hybrides !"
+        );
     }
 }
