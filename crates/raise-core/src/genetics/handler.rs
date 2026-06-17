@@ -18,12 +18,13 @@ struct MbseEvaluator {
     component_metrics: UnorderedMap<String, JsonValue>,
 }
 
+#[async_interface]
 impl Evaluator<SystemAllocationGenome> for MbseEvaluator {
     fn objective_names(&self) -> Vec<String> {
         vec!["MinusWeight".into(), "MinusCost".into()]
     }
 
-    fn evaluate(&self, genome: &SystemAllocationGenome) -> (Vec<f32>, f32) {
+    async fn evaluate(&self, genome: &SystemAllocationGenome) -> (Vec<f32>, f32) {
         let mut total_weight = 0.0;
         let mut total_cost = 0.0;
         let mut constraints_violation = 0.0;
@@ -118,35 +119,30 @@ impl NodeHandler for GeneticsHandler {
             json_value!({"generations": genetic_config.max_generations})
         );
 
-        // 3. Exécution de l'algorithme sur thread CPU dédié
-        let f_ids = function_ids.clone();
-        let c_ids = component_ids.clone();
-        let engine_config = genetic_config.clone();
+        // 3. Exécution asynchrone (Non-bloquant grâce à join_all)
+        let engine = GeneticEngine::new(
+            evaluator,
+            TournamentSelection::new(2),
+            genetic_config.clone(),
+        );
+        let mut pop = Population::new();
+        for _ in 0..genetic_config.population_size {
+            pop.add(Individual::new(SystemAllocationGenome::new_random(
+                function_ids.clone(),
+                component_ids.clone(),
+            )));
+        }
 
-        let best_genome = match spawn_cpu_task(move || {
-            let engine = GeneticEngine::new(evaluator, TournamentSelection::new(2), engine_config);
-            let mut pop = Population::new();
-            for _ in 0..genetic_config.population_size {
-                pop.add(Individual::new(SystemAllocationGenome::new_random(
-                    f_ids.clone(),
-                    c_ids.clone(),
-                )));
+        let final_pop = engine.run(pop, |_| {}).await;
+
+        let best_genome = match final_pop.get_elites(1).into_iter().next() {
+            Some(individual) => individual.genome,
+            None => {
+                raise_error!(
+                    "ERR_GENETICS_NO_SOLUTION",
+                    context = json_value!({"node_id": node.id})
+                )
             }
-            let final_pop = engine.run(pop, |_| {});
-            final_pop.get_elites(1).into_iter().next()
-        })
-        .await
-        {
-            Ok(Some(individual)) => individual.genome,
-            Ok(None) => raise_error!(
-                "ERR_GENETICS_NO_SOLUTION",
-                context = json_value!({"node_id": node.id})
-            ),
-            Err(e) => raise_error!(
-                "ERR_GENETICS_CPU_PANIC",
-                error = e.to_string(),
-                context = json_value!({"node_id": node.id})
-            ),
         };
 
         // 4. Génération et injection des artefacts Arcadia

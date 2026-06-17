@@ -157,6 +157,14 @@ pub enum AiCommands {
         prompt: String,
     },
 
+    /// 💾 Valide une mutation en staging et l'intègre au code de production
+    #[command(visible_alias = "c")]
+    Commit {
+        /// Le handle du module parent en staging (ex: mod_kernel_assets_rs)
+        #[arg(long)]
+        handle: String,
+    },
+
     #[command(visible_alias = "a-check")]
     Audit {
         /// Identifiant du domaine à auditer (ex: 'modeling')
@@ -542,6 +550,32 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
                     "AI_MUTATION_SKIPPED",
                     json_value!({"reason": "L'agent n'a rien retourné."})
                 );
+            }
+        }
+
+        AiCommands::Commit { handle } => {
+            user_info!("AI_COMMIT_START", json_value!({"target": handle}));
+
+            // Appel direct au service métier Zéro Dette qui gère la transaction complète
+            match raise_core::services::codegen_service::commit_module(
+                &handle,
+                &ctx.active_domain,
+                &ctx.active_db,
+                &ctx.storage,
+                ctx.is_test_mode,
+            )
+            .await
+            {
+                Ok(final_path) => {
+                    user_success!("AI_COMMIT_SUCCESS", json_value!({"path": final_path}));
+                    println!("\n✅ Mutation fusionnée avec succès !");
+                    println!("📁 Fichier de production mis à jour : {}", final_path);
+                }
+                Err(e) => raise_error!(
+                    "ERR_AI_COMMIT_FAILED",
+                    error = e,
+                    context = json_value!({"handle": handle})
+                ),
             }
         }
 

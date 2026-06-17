@@ -4,7 +4,6 @@ use crate::genetics::operators::selection::SelectionStrategy;
 use crate::genetics::traits::{Evaluator, Genome};
 use crate::genetics::types::{Fitness, Individual, Population};
 use rand::prelude::*;
-use rayon::prelude::*;
 
 /// Configuration du moteur génétique.
 #[derive(Clone, Debug)]
@@ -63,22 +62,20 @@ where
         pop
     }
 
-    pub fn evolve_generation(&self, population: &mut Population<G>) {
-        self.evaluate_population(population);
+    pub async fn evolve_generation(&self, population: &mut Population<G>) {
+        self.evaluate_population(population).await;
         self.fast_non_dominated_sort(population);
 
         let mut next_gen_individuals = Vec::with_capacity(self.config.population_size);
         let elites = population.get_elites(self.config.elitism_count);
         next_gen_individuals.extend(elites);
 
-        // UPDATE: rand::rng() au lieu de thread_rng()
         let mut rng = rand::rng();
 
         while next_gen_individuals.len() < self.config.population_size {
             let parent1 = self.selection.select(&mut rng, population);
             let parent2 = self.selection.select(&mut rng, population);
 
-            // UPDATE: random() au lieu de gen()
             let mut child_genome = if rng.random::<f32>() < self.config.crossover_rate {
                 parent1.genome.crossover(&parent2.genome)
             } else {
@@ -93,35 +90,56 @@ where
         population.generation += 1;
     }
 
-    pub fn run<F>(&self, mut population: Population<G>, mut callback: F) -> Population<G>
+    pub async fn run<F>(&self, mut population: Population<G>, mut callback: F) -> Population<G>
     where
         F: FnMut(&Population<G>),
     {
-        self.evaluate_population(&mut population);
+        self.evaluate_population(&mut population).await;
         self.fast_non_dominated_sort(&mut population);
         callback(&population);
 
         for _ in 0..self.config.max_generations {
-            self.evolve_generation(&mut population);
+            self.evolve_generation(&mut population).await;
             callback(&population);
         }
 
         population
     }
 
-    fn evaluate_population(&self, population: &mut Population<G>) {
-        // UPDATE: Utilisation de par_iter_mut() nécessite rayon::iter::IntoParallelRefMutIterator
-        // Si Rayon est bien configuré, ceci fonctionne.
-        population.individuals.par_iter_mut().for_each(|ind| {
+    async fn evaluate_population(&self, population: &mut Population<G>) {
+        let mut eval_tasks = Vec::new();
+
+        // 1. Un seul type de bloc async pour toutes les tâches
+        for (i, ind) in population.individuals.iter().enumerate() {
             if ind.fitness.is_none() {
-                if !self.evaluator.is_valid(&ind.genome) {
-                    ind.fitness = Some(Fitness::new(vec![], f32::MAX));
-                } else {
-                    let (objs, violation) = self.evaluator.evaluate(&ind.genome);
-                    ind.fitness = Some(Fitness::new(objs, violation));
+                let evaluator = &self.evaluator;
+                let genome = &ind.genome;
+
+                eval_tasks.push(async move {
+                    if !evaluator.is_valid(genome) {
+                        (i, None)
+                    } else {
+                        let (objs, violation) = evaluator.evaluate(genome).await;
+                        (i, Some((objs, violation)))
+                    }
+                });
+            }
+        }
+
+        // 2. Exécution concurrente asynchrone
+        let results = futures::future::join_all(eval_tasks).await;
+
+        // 3. Application des résultats
+        for (i, res) in results {
+            match res {
+                Some((objs, violation)) => {
+                    population.individuals[i].fitness = Some(Fitness::new(objs, violation));
+                }
+                None => {
+                    population.individuals[i].fitness = Some(Fitness::new(vec![], f32::MAX));
                 }
             }
-        });
+        }
     }
 
     fn fast_non_dominated_sort(&self, population: &mut Population<G>) {
@@ -289,17 +307,19 @@ mod tests {
     }
 
     struct SimpleEvaluator;
+
+    #[async_interface]
     impl Evaluator<NumberGenome> for SimpleEvaluator {
         fn objective_names(&self) -> Vec<String> {
             vec!["Max".into(), "Min".into()]
         }
-        fn evaluate(&self, g: &NumberGenome) -> (Vec<f32>, f32) {
+        async fn evaluate(&self, g: &NumberGenome) -> (Vec<f32>, f32) {
             (vec![g.0, -g.0], 0.0)
         }
     }
 
-    #[test]
-    fn test_engine_workflow() {
+    #[async_test]
+    async fn test_engine_workflow() {
         let config = GeneticConfig {
             population_size: 10,
             max_generations: 2,
@@ -307,7 +327,7 @@ mod tests {
         };
         let engine = GeneticEngine::new(SimpleEvaluator, TournamentSelection::new(2), config);
         let mut pop = engine.initialize_population();
-        engine.evolve_generation(&mut pop);
+        engine.evolve_generation(&mut pop).await;
         assert_eq!(pop.generation, 1);
     }
 }

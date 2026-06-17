@@ -1,6 +1,7 @@
 use crate::genetics::evaluators::constraints::SystemConstraint;
 use crate::genetics::genomes::arcadia_arch::SystemAllocationGenome;
 use crate::genetics::traits::Evaluator;
+use crate::utils::prelude::*;
 
 /// Modèle de coûts statique (ne change pas pendant l'évolution).
 /// Contient les données du problème Arcadia (Dataflows, Charges CPU, etc.).
@@ -82,6 +83,7 @@ impl ArchitectureEvaluator {
     }
 }
 
+#[async_interface]
 impl Evaluator<SystemAllocationGenome> for ArchitectureEvaluator {
     fn objective_names(&self) -> Vec<String> {
         vec![
@@ -90,7 +92,7 @@ impl Evaluator<SystemAllocationGenome> for ArchitectureEvaluator {
         ]
     }
 
-    fn evaluate(&self, genome: &SystemAllocationGenome) -> (Vec<f32>, f32) {
+    async fn evaluate(&self, genome: &SystemAllocationGenome) -> (Vec<f32>, f32) {
         let num_components = self.model.component_capacities.len();
 
         // Accumulateurs
@@ -193,8 +195,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_evaluate_basic_objectives() {
+    #[async_test]
+    async fn test_evaluate_basic_objectives() {
         // 3 Fonctions, 2 Composants
         // Flux F0->F1 (100)
         // Charges F0=2, F1=2, F2=12
@@ -213,14 +215,14 @@ mod tests {
         // - Couplage = 0
         // - Charge C0 = 16 (Dépassement 6 -> Violation 60.0)
         let g_bad_cap = create_genome(vec![0, 0, 0]);
-        let (objs, viol) = evaluator.evaluate(&g_bad_cap);
+        let (objs, viol) = evaluator.evaluate(&g_bad_cap).await;
 
         assert_eq!(objs[0], 0.0); // Pas de flux externe
         assert_eq!(viol, 60.0); // (16 - 10) * 10.0
     }
 
-    #[test]
-    fn test_evaluate_with_custom_constraints() {
+    #[async_test]
+    async fn test_evaluate_with_custom_constraints() {
         let model =
             ArchitectureCostModel::new(2, 2, &[], &[(0, 1.0), (1, 1.0)], &[(0, 10.0), (1, 10.0)]);
 
@@ -235,12 +237,12 @@ mod tests {
 
         // Cas : F0 et F1 sur C0 -> Violation
         let g_violation = create_genome(vec![0, 0]);
-        let (_, v1) = evaluator.evaluate(&g_violation);
+        let (_, v1) = evaluator.evaluate(&g_violation).await;
         assert_eq!(v1, 500.0);
 
         // Cas : F0 sur C0, F1 sur C1 -> OK
         let g_ok = create_genome(vec![0, 1]);
-        let (_, v2) = evaluator.evaluate(&g_ok);
+        let (_, v2) = evaluator.evaluate(&g_ok).await;
         assert_eq!(v2, 0.0);
     }
 }

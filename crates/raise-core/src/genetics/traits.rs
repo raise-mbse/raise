@@ -22,13 +22,14 @@ pub trait Genome:
 }
 
 /// Le trait Evaluator fait le lien avec le métier (Arcadia, Règles, etc.).
+#[async_interface]
 pub trait Evaluator<G: Genome>: Send + Sync {
     /// Retourne les noms des objectifs pour l'affichage (ex: ["Performance", "Coût"]).
     fn objective_names(&self) -> Vec<String>;
 
-    /// Calcule les scores.
+    /// Calcule les scores de manière asynchrone pour permettre les I/O.
     /// Retourne : (Vec<valeurs_objectifs>, score_violation_contraintes).
-    fn evaluate(&self, genome: &G) -> (Vec<f32>, f32);
+    async fn evaluate(&self, genome: &G) -> (Vec<f32>, f32);
 
     /// Vérification rapide structurelle (Hard Constraints).
     /// Si false, on peut court-circuiter evaluate() avec une pénalité maximale.
@@ -37,7 +38,10 @@ pub trait Evaluator<G: Genome>: Send + Sync {
     }
 }
 
-// --- Tests Unitaires ---
+// =========================================================================
+// TESTS UNITAIRES (Conformité Architecture Data-Driven & Résilience)
+// =========================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,24 +63,26 @@ mod tests {
     }
 
     struct MockEval;
+
+    #[async_interface]
     impl Evaluator<MockGenome> for MockEval {
         fn objective_names(&self) -> Vec<String> {
             vec!["TestObj".into()]
         }
-        fn evaluate(&self, g: &MockGenome) -> (Vec<f32>, f32) {
+        async fn evaluate(&self, g: &MockGenome) -> (Vec<f32>, f32) {
             (vec![g.0 as f32], 0.0)
         }
     }
 
-    #[test]
-    fn test_trait_interaction() {
+    #[async_test]
+    async fn test_trait_interaction() {
         let mut g = MockGenome::random();
         assert_eq!(g.0, 42);
         g.mutate(0.1);
         assert_eq!(g.0, 43);
 
         let eval = MockEval;
-        let (res, violation) = eval.evaluate(&g);
+        let (res, violation) = eval.evaluate(&g).await;
         assert_eq!(res[0], 43.0);
         assert_eq!(violation, 0.0);
     }

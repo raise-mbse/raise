@@ -12,6 +12,10 @@ use crate::ai::context::rag::RagRetriever;
 use crate::ai::graph_store::builder::SoftwareGraphBuilder;
 use crate::ai::world_model::perception::encoder::HybridEncoder;
 
+use crate::genetics::evaluators::codegen::CodeGenEvaluator;
+use crate::genetics::genomes::ast_arch::{AstGenome, AstNode};
+use crate::genetics::traits::Evaluator;
+
 use super::intent_classifier::EngineeringIntent;
 use super::prompt_engine::PromptEngine;
 use super::{Agent, AgentContext, AgentResult, CreatedArtifact};
@@ -140,7 +144,7 @@ impl Agent for SoftwareAgent {
             }
         };
 
-        // 4. Investigation (Lecture Physique / DB Graphe via la Forteresse)
+        // 4. Investigation (Lecture DB Graphe via la Forteresse)
         let mut element_doc = match ws_manager
             .get_document("code_elements", target_handle)
             .await
@@ -163,7 +167,7 @@ impl Agent for SoftwareAgent {
             .unwrap_or("")
             .to_string();
 
-        // 5. INTÉGRATION DU CONTEXTE GLOBAL (MÉMOIRE + RAG TEXTUEL)
+        // 5. Intégration du Contexte Global (Mémoire + RAG Textuel)
         let memory_store = MemoryStore::new(&sys_manager).await?;
         let mut session = memory_store
             .load_or_create(&sys_manager, &ctx.session_id)
@@ -180,40 +184,33 @@ impl Agent for SoftwareAgent {
             }
         };
 
-        // 🌟 5.bis RAG TOPOLOGIQUE (LE GRAPH RAG)
+        // 🌟 5.bis RAG Topologique (Graph RAG)
         let mut graph_ctx_str = String::new();
         let device = ComputeHardware::Cpu;
 
-        // Initialisation légère de l'encodeur avec les poids du World Model
         let vb =
             NeuralWeightsBuilder::from_varmap(&ctx.world_engine.varmap, ComputeType::F32, &device);
         if let Ok(hybrid_encoder) = HybridEncoder::new(384, 16, vb) {
-            // Construction à la volée du graphe de l'espace de travail
             if let Ok((adj, _features)) =
                 SoftwareGraphBuilder::build_code_graph(&ws_manager, &hybrid_encoder, &device).await
             {
                 let target_uri = format!("code_elements:{}", target_handle);
 
-                // Si la fonction ciblée est dans le graphe, on extrait ses voisins !
                 if let Some(&target_idx) = adj.uri_to_index.get(&target_uri) {
                     let src_vec = adj.edge_src.to_vec1::<u32>().unwrap_or_default();
                     let dst_vec = adj.edge_dst.to_vec1::<u32>().unwrap_or_default();
 
                     let mut related_uris = Vec::new();
-                    // On parcourt la topologie creuse (COO) pour trouver les arêtes partantes
                     for (i, &u) in src_vec.iter().enumerate() {
                         if u as usize == target_idx {
                             let v = dst_vec[i] as usize;
                             if v != target_idx {
-                                // On ignore le self-loop
                                 related_uris.push(adj.index_to_uri[v].clone());
                             }
                         }
                     }
 
-                    // On traduit les URIs du graphe en vraies signatures de code pour le LLM
                     for uri in related_uris.into_iter().take(3) {
-                        // Limite à 3 pour la VRAM
                         let parts: Vec<&str> = uri.split(':').collect();
                         if parts.len() == 2 && parts[0] == "code_elements" {
                             if let Ok(Some(dep_doc)) =
@@ -232,53 +229,120 @@ impl Agent for SoftwareAgent {
             }
         }
 
-        // 🎯 FIX CRITIQUE : Modification de l'instruction pour exiger du Markdown pur
-        let user_prompt = format!(
-            "=== INVESTIGATION : AST DU COMPOSANT ===\nHandle: {}\nType: {}\nSignature: {}\n\n=== CORPS ACTUEL ===\n{}\n\n=== TÂCHE / MUTATION ===\n{}\n\n⚠️ INSTRUCTION CRITIQUE : Tu es un compilateur. Retourne UNIQUEMENT le nouveau code source complet et modifié dans un bloc markdown (commençant par ```rust et finissant par ```). N'ajoute AUCUN texte, AUCUNE explication, et NE RETOURNE SURTOUT PAS DE JSON.",
-            target_handle, element_type, signature, body, instruction
-        );
-
-        session.add_user_message(&user_prompt);
-        let history_str = session.to_context_string();
-
-        let contextualized_prompt = format!(
-            "{}\n\n=== CONTEXTE DOCUMENTAIRE ===\n{}\n\n=== CONTEXTE ARCHITECTURAL ===\n{}\n\n=== CORPS ACTUEL ===\n{}\n\n=== INSTRUCTION CRITIQUE ===\n1. LIS LE CORPS ACTUEL.\n2. APPLIQUE STRICTEMENT CETTE MUTATION : {}\n3. RETOURNE LE CODE COMPLET.",
-            history_str, rag_ctx, graph_ctx_str, body, instruction
-        );
+        // =========================================================================
+        // 🧬 BOUCLE ÉVOLUTIONNAIRE NEURO-SYMBOLIQUE (Validation par Compilateur)
+        // =========================================================================
+        let mut attempts = 0;
+        let max_attempts = 3;
+        let mut final_body = String::new();
+        let mut current_instruction = instruction.clone();
 
         crate::user_info!(
-            "AI_CODER_THINKING",
-            json_value!({"action": "Inférence neuronale architecturale..."})
+            "AI_CODER_START_EVOLUTION",
+            json_value!({"max_attempts": max_attempts})
         );
 
-        // 6. Exécution via LLM
-        let response = ctx
-            .llm
-            .ask(
-                LlmBackend::LocalLlama,
-                &system_prompt,
-                &contextualized_prompt,
-                Clearance::Internal,
-            )
-            .await?;
+        while attempts < max_attempts {
+            attempts += 1;
 
-        // 7. Persistance de la Session
-        session.add_ai_message(&response);
+            let user_prompt = format!(
+                "=== INVESTIGATION : AST DU COMPOSANT ===\nHandle: {}\nType: {}\nSignature: {}\n\n=== CORPS ACTUEL ===\n{}\n\n=== TÂCHE / MUTATION ===\n{}\n\n⚠️ INSTRUCTION CRITIQUE : Tu es un compilateur. Retourne UNIQUEMENT le nouveau code source complet et modifié dans un bloc markdown (commençant par ```rust et finissant par ```). N'ajoute AUCUN texte, AUCUNE explication, et NE RETOURNE SURTOUT PAS DE JSON.",
+                target_handle, element_type, signature, body, current_instruction
+            );
+
+            session.add_user_message(&user_prompt);
+            let history_str = session.to_context_string();
+
+            let contextualized_prompt = format!(
+                "{}\n\n=== CONTEXTE DOCUMENTAIRE ===\n{}\n\n=== CONTEXTE ARCHITECTURAL ===\n{}\n\n=== CORPS ACTUEL ===\n{}\n\n=== INSTRUCTION CRITIQUE ===\n1. LIS LE CORPS ACTUEL.\n2. APPLIQUE STRICTEMENT CETTE MUTATION : {}\n3. RETOURNE LE CODE COMPLET.",
+                history_str, rag_ctx, graph_ctx_str, body, current_instruction
+            );
+
+            crate::user_info!(
+                "AI_CODER_THINKING",
+                json_value!({"action": format!("Inférence neuronale (Génération {}/{})", attempts, max_attempts)})
+            );
+
+            // Inférence via le LLM local (Moteur de Mutation)
+            let response = ctx
+                .llm
+                .ask(
+                    LlmBackend::LocalLlama,
+                    &system_prompt,
+                    &contextualized_prompt,
+                    Clearance::Internal,
+                )
+                .await?;
+
+            session.add_ai_message(&response);
+
+            // Extraction syntaxique du bloc markdown
+            let new_body = match extract_rust_code(&response) {
+                Some(code) => code,
+                None => {
+                    crate::user_warn!(
+                        "WARN_AI_CODER_NO_MARKDOWN",
+                        json_value!({"attempt": attempts})
+                    );
+                    current_instruction = "ERREUR : Aucun bloc markdown ```rust trouvé. Tu dois absolument encapsuler ton code. Recommence.".to_string();
+                    continue;
+                }
+            };
+
+            // Évaluation symbolique stricte de la mutation (rustc via la façade)
+            let temp_dir = match tempdir() {
+                Ok(dir) => dir,
+                Err(e) => raise_error!("ERR_FS_TEMP", error = e.to_string()),
+            };
+            let evaluator = CodeGenEvaluator::new(temp_dir.path().to_path_buf());
+
+            let ast_candidate = AstGenome {
+                root: AstNode::Function {
+                    signature: signature.clone(),
+                    body: new_body.clone(),
+                },
+            };
+
+            crate::user_info!(
+                "AI_CODER_COMPILING",
+                json_value!({"action": "Vérification de l'intégrité de l'AST"})
+            );
+            let (objs, violation) = evaluator.evaluate(&ast_candidate).await;
+
+            if violation == 0.0 {
+                // Le code compile sans avertissements ni erreurs, objectif atteint !
+                crate::user_success!("SUC_AI_CODER_VALID", json_value!({"conciseness": objs[0]}));
+                final_body = new_body;
+                break;
+            } else {
+                // Échec de compilation : injection des erreurs dans la mémoire pour auto-correction
+                crate::user_warn!(
+                    "WRN_AI_CODER_INVALID_SYNTAX",
+                    json_value!({"violation": violation})
+                );
+                current_instruction = format!(
+                    "ERREUR DE COMPILATION SÉMANTIQUE : Ton code a échoué à la validation stricte (Pénalité: {}). Corrige immédiatement les erreurs syntaxiques ou de cycle de vie (borrow checker) détectées et ré-émets le code complet.",
+                    violation
+                );
+            }
+        }
+
+        // 9. Validation du Front Évolutionnaire
+        if final_body.is_empty() {
+            raise_error!(
+                "ERR_AI_CODER_EVOLUTION_FAILED",
+                error = format!("Le modèle local n'a pas réussi à converger vers un AST valide après {} générations.", max_attempts)
+            );
+        }
+
+        // 10. Persistance transactionnelle de la session
         if let Err(e) = memory_store.save_session(&sys_manager, &session).await {
             crate::user_warn!("WARN_SESSION_SAVE", json_value!({"err": e.to_string()}));
         }
 
-        // 8. Extraction et Validation (Markdown-Driven)
-        let new_body = match extract_rust_code(&response) {
-            Some(code) => code,
-            None => raise_error!(
-                "ERR_AI_CODER_INVALID_RESPONSE",
-                error = "L'IA n'a pas retourné de bloc de code markdown valide (```rust ... ```)."
-            ),
-        };
-
+        // Injection du code certifié conforme
         if let Some(obj) = element_doc.as_object_mut() {
-            obj.insert("body".to_string(), json_value!(new_body));
+            obj.insert("body".to_string(), json_value!(final_body));
         }
 
         ws_manager
@@ -290,7 +354,7 @@ impl Agent for SoftwareAgent {
             json_value!({"handle": target_handle})
         );
 
-        // 9. Processus de Validation Physique (Staging)
+        // 11. Processus de Staging Physique Explicite
         let module_handle_ref = element_doc
             .get("module_handle")
             .and_then(|v| v.as_str())
@@ -332,7 +396,7 @@ impl Agent for SoftwareAgent {
 
         Ok(Some(AgentResult {
             message: format!(
-                "Mutation stricte appliquée sur le composant {}.",
+                "Mutation sémantique validée par compilation croisée sur le composant {}.",
                 target_handle
             ),
             artifacts,
@@ -679,7 +743,7 @@ mod tests {
         assert!(res
             .unwrap_err()
             .to_string()
-            .contains("ERR_AI_CODER_INVALID_RESPONSE"));
+            .contains("ERR_AI_CODER_EVOLUTION_FAILED"));
 
         Ok(())
     }

@@ -100,17 +100,19 @@ where
     }
 
     // 5. Exécution avec Télémétrie (Émissions d'événements Tauri)
-    let final_pop = engine.run(population, |pop| {
-        if let Some(best) = pop.individuals.first() {
-            if let Some(fit) = &best.fitness {
-                on_progress(OptimizationProgress {
-                    generation: pop.generation,
-                    best_fitness: fit.values.clone(),
-                    diversity: fit.crowding_distance,
-                });
+    let final_pop = engine
+        .run(population, |pop| {
+            if let Some(best) = pop.individuals.first() {
+                if let Some(fit) = &best.fitness {
+                    on_progress(OptimizationProgress {
+                        generation: pop.generation,
+                        best_fitness: fit.values.clone(),
+                        diversity: fit.crowding_distance,
+                    });
+                }
             }
-        }
-    });
+        })
+        .await;
 
     // 6. Extraction du Front de Pareto
     let pareto_front: Vec<AllocatedSolution> = final_pop
