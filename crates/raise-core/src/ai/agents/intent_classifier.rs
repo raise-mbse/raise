@@ -53,6 +53,12 @@ pub enum EngineeringIntent {
         target_handle: String,
         instruction: String,
     },
+
+    #[serde(rename = "ingest_normative_reference")]
+    IngestNormativeReference {
+        /// Le chemin ou le nom du fichier (ex: "directive_2026_288.xml")
+        path: String,
+    },
 }
 
 fn default_scope() -> String {
@@ -79,6 +85,7 @@ impl EngineeringIntent {
             Self::Chat | Self::Unknown => "ref:agents:handle:agent_dispatcher",
             Self::GenerateCode { .. } => "ref:agents:handle:agent_software",
             Self::MutateCode { .. } => "ref:agents:handle:agent_software",
+            Self::IngestNormativeReference { .. } => "ref:agents:handle:agent_software",
         }
     }
 

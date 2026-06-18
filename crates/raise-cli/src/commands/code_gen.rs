@@ -42,6 +42,10 @@ pub enum CodeGenCommands {
     Weave {
         module_handle: String,
     },
+    /// Génère un module de validation Rust à partir d'une contrainte MBSE
+    GenerateValidator {
+        constraint_handle: String,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -244,6 +248,32 @@ pub async fn handle(args: CodeGenArgs, ctx: CliContext) -> RaiseResult<()> {
                     json_value!({ "module": module_handle, "final_path": final_path })
                 ),
                 Err(e) => raise_error!("ERR_WEAVE_FAILED", error = e),
+            }
+        }
+
+        CodeGenCommands::GenerateValidator { constraint_handle } => {
+            user_info!(
+                "CODE_GEN_VALIDATOR_START",
+                json_value!({ "constraint": constraint_handle })
+            );
+
+            // Appel de la fonction que nous avons écrite à l'Étape 5
+            match codegen_service::generate_constraint_validator(
+                &constraint_handle,
+                &ctx.active_domain,
+                &ctx.active_db,
+                &ctx.storage,
+                ctx.is_test_mode,
+            )
+            .await
+            {
+                Ok(path) => {
+                    user_success!(
+                        "CODE_GEN_VALIDATOR_SUCCESS",
+                        json_value!({ "constraint": constraint_handle, "path": path })
+                    );
+                }
+                Err(e) => raise_error!("ERR_GEN_VALIDATOR_FAILED", error = e),
             }
         }
     }

@@ -22,6 +22,8 @@ pub enum ModelCommands {
     Validate,
     /// Transforme le modèle vers un domaine spécifique (Projection)
     Transform { domain: String },
+    /// ⚖️ Ingeste une directive européenne (EUR-Lex) et extrait l'ontologie
+    IngestEurlex { path: String },
 }
 
 pub async fn handle(args: ModelArgs, ctx: CliContext) -> RaiseResult<()> {
@@ -93,6 +95,25 @@ pub async fn handle(args: ModelArgs, ctx: CliContext) -> RaiseResult<()> {
                 );
             }
         }
+
+        ModelCommands::IngestEurlex { path } => {
+            use raise_core::services::model_service;
+
+            user_info!("CLI_INGEST_EURLEX_START", json_value!({ "path": &path }));
+
+            let count = model_service::ingest_eurlex_directive(
+                &ctx.storage,
+                &ctx.active_domain,
+                &ctx.active_db,
+                &path,
+            )
+            .await?; 
+
+            user_success!(
+                "CLI_INGEST_EURLEX_DONE",
+                json_value!({ "elements": count, "path": path })
+            );
+        }
     }
     Ok(())
 }
@@ -120,5 +141,35 @@ mod tests {
         };
 
         handle(args, ctx).await
+    }
+
+    #[async_test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
+    async fn test_cli_ingest_eurlex_file_not_found() -> RaiseResult<()> {
+        let sandbox = DbSandbox::new().await?;
+        let storage = SharedRef::new(sandbox.storage.clone());
+        let session_mgr = crate::context::SessionManager::new(storage.clone());
+
+        let ctx = crate::CliContext::mock(AppConfig::get(), session_mgr, storage);
+        let args = ModelArgs {
+            command: ModelCommands::IngestEurlex {
+                path: "/fake/path/directive.xml".to_string(),
+            },
+        };
+
+        // L'exécution doit échouer proprement via le service qui lève ERR_FS_NOT_FOUND
+        let result = handle(args, ctx).await;
+
+        assert!(
+            result.is_err(),
+            "La commande devrait échouer car le fichier n'existe pas"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("ERR_FS_NOT_FOUND"),
+            "L'erreur remontée doit être ERR_FS_NOT_FOUND"
+        );
+
+        Ok(())
     }
 }

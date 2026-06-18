@@ -84,6 +84,7 @@ mod tests {
 
     #[async_test]
     async fn test_model_validator_trait_integration() -> RaiseResult<()> {
+        crate::utils::testing::mock::inject_mock_config().await;
         // 1. Setup minimal du Loader (nécessaire pour la signature)
         let dir = tempdir().unwrap();
         let config = JsonDbConfig::new(dir.path().to_path_buf());

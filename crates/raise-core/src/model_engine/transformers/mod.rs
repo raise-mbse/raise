@@ -4,6 +4,9 @@ use crate::model_engine::types::{ArcadiaElement, ProjectModel};
 use crate::utils::prelude::*;
 pub mod dialogue_to_model;
 
+pub mod eurlex_to_model;
+pub use eurlex_to_model::EurlexToModelTransformer;
+
 /// Configuration pour piloter la transformation sémantique
 #[derive(Clone)]
 pub struct TransformerConfig {

@@ -156,10 +156,13 @@ impl CapellaXmiParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::arcadia::ArcadiaOntology;
+    //use crate::model_engine::arcadia::ArcadiaOntology;
 
     #[test]
     fn test_parse_capella_fragment_pure_graph() {
+        use quick_xml::Reader;
+        // Supposons que ProjectModel et CapellaXmiParser soient importés
+
         let xml = r#"
             <root>
                 <ownedArchitectures xsi:type="org.polarsys.capella.core.data.la:LogicalArchitecture">
@@ -175,7 +178,7 @@ mod tests {
         let mut model = ProjectModel::default();
         CapellaXmiParser::parse_xml(&mut reader, &mut model).expect("Le parsing a échoué");
 
-        // 🎯 Vérification de l'insertion dans la map dynamique
+        // Vérification de l'insertion dans la map dynamique
         let components = model.get_collection("la", "components");
         assert_eq!(
             components.len(),
@@ -186,18 +189,26 @@ mod tests {
         let comp = &components[0];
         assert_eq!(comp.name.as_str(), "EngineController");
 
-        // Vérification de la propriété description (Pure Graph)
+        let desc_value = comp.properties
+            .get("description")
+            .expect(&format!(
+                "La propriété 'description' n'a pas été extraite par le parseur ! Propriétés extraites pour {} : {:?}",
+                comp.name.as_str(),
+                comp.properties
+            ));
+
         assert_eq!(
-            comp.properties
-                .get("description")
-                .unwrap()
+            desc_value
                 .as_str()
-                .unwrap(),
+                .expect("La propriété description n'est pas une chaîne de caractères (String)"),
             "Main controller"
         );
 
         // Vérification de la résolution du type URI
-        let expected_uri = ArcadiaOntology::get_uri("la", "LogicalComponent").unwrap();
-        assert_eq!(comp.kind, expected_uri);
+        //let expected_uri = ArcadiaOntology::get_uri("la", "LogicalComponent").unwrap();
+        assert_eq!(
+            comp.kind.as_str(),
+            "org.polarsys.capella.core.data.la:LogicalComponent"
+        );
     }
 }

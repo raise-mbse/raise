@@ -2,6 +2,7 @@
 
 pub mod analyzers; // Analyse sémantique Arcadia
 pub mod diff; // Moteur de comparaison (Jumeau vs Physique)
+pub mod generators;
 pub mod graph; // Tri topologique des dépendances
 pub mod graph_weaver; // Pont "Graphe ➡️ AST ➡️ Code"
 pub mod models; // Modèles de données (CodeElement, Module)
@@ -9,7 +10,7 @@ pub mod module_weaver; // Orchestration du tissage fichier
 pub mod reconcilers; // Extraction Bottom-Up via @raise-handle
 pub mod toolchains;
 pub mod utils; // Utilitaires mathématiques (String transformation)
-pub mod weaver; // Tissage unitaire des blocs de code
+pub mod weaver; // Tissage unitaire des blocs de code //Générateur de Contrainte
 
 use self::diff::{DiffAction, DiffEngine};
 use self::models::{Module, StagedModule, TargetLanguage};

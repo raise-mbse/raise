@@ -189,8 +189,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_consistency_local_logic() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_consistency_local_logic() -> RaiseResult<()> {
+        // 1. Amorçage ultra-léger du registre sémantique en mémoire (Mock)
+        crate::utils::testing::mock::inject_mock_config().await;
         let checker = ConsistencyChecker::new();
         let el = ArcadiaElement {
             id: "UUID-OK".to_string(),

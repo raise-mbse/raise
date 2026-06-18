@@ -8,9 +8,10 @@ pub mod types;
 // 2. Modules de Logique Métier (Les fonctionnalités)
 pub mod arcadia; // Définitions sémantiques (OA, SA, LA, PA)
 pub mod capella; // Support des fichiers .capella / .aird
+pub mod eurlex;
 pub mod sysml2;
 pub mod transformers; // Génération de code et conversion
-pub mod validators; // Vérification de cohérence
+pub mod validators; // Vérification de cohérence // Conformité
 
 // 3. Re-exports (Façade publique pour le reste de l'app)
 

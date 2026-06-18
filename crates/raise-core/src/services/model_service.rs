@@ -130,6 +130,48 @@ pub async fn ingest_arcadia_elements(
 }
 
 // =========================================================================
+// INGESTION DE RÉFÉRENCES NORMATIVES (EUR-Lex)
+// =========================================================================
+
+/// ⚖️ Ingeste une directive européenne (EUR-Lex) et extrait l'ontologie via le moteur d'ingestion.
+/// Protégé par la façade R.A.I.S.E (Zéro appel direct à std::).
+pub async fn ingest_eurlex_directive(
+    storage: &StorageEngine,
+    domain: &str,
+    db: &str,
+    path_str: &str,
+) -> RaiseResult<usize> {
+    use crate::model_engine::ingestion::ModelIngestionService;
+
+    crate::user_info!("SRV_INGEST_EURLEX_INIT", json_value!({ "path": path_str }));
+
+    // 1. Utilisation stricte de la façade RAISE (crate::utils::prelude::PathBuf et fs::)
+    let path = PathBuf::from(path_str);
+
+    if !fs::exists_async(&path).await {
+        // La macro gère le return Err() automatiquement
+        raise_error!(
+            "ERR_FS_NOT_FOUND",
+            error = "Le fichier XML de la directive est introuvable.",
+            context = json_value!({"path": path_str})
+        );
+    }
+
+    // 2. Initialisation du Manager sur le Workspace actif
+    let manager = CollectionsManager::new(storage, domain, db);
+
+    // 3. Délégation au noyau MBSE
+    let elements_inserted = ModelIngestionService::ingest_eurlex(path, &manager).await?;
+
+    crate::user_success!(
+        "SRV_INGEST_EURLEX_SUCCESS",
+        json_value!({ "elements_inserted": elements_inserted, "path": path_str })
+    );
+
+    Ok(elements_inserted)
+}
+
+// =========================================================================
 // TESTS UNITAIRES (Conformité Façade & Résilience Mount Points)
 // =========================================================================
 
@@ -246,5 +288,23 @@ mod tests {
             }
             _ => panic!("Aurait dû lever ERR_ONTOLOGY_MAPPING_NOT_FOUND"),
         }
+    }
+
+    #[async_test]
+    async fn test_resilience_ingest_eurlex_missing_file() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let config = AppConfig::get();
+
+        let res = ingest_eurlex_directive(
+            &sandbox.db,
+            &config.mount_points.system.domain,
+            &config.mount_points.system.db,
+            "/fake/path.xml",
+        )
+        .await;
+
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("ERR_FS_NOT_FOUND"));
+        Ok(())
     }
 }

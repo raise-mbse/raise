@@ -2,9 +2,11 @@
 
 use crate::utils::prelude::*; // 🎯 Façade Unique RAISE
 
+use crate::code_generator::generators::ConstraintValidatorGenerator;
 use crate::code_generator::models::StagedModule;
 use crate::code_generator::module_weaver::ModuleWeaver;
 use crate::code_generator::CodeGeneratorService;
+
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::storage::StorageEngine;
 use crate::model_engine::loader::ModelLoader;
@@ -401,4 +403,64 @@ pub async fn link_module(
     let resolved_count = analyzer.link_module("code_elements", module_handle).await?;
 
     Ok(resolved_count)
+}
+
+/// ⚖️ MATÉRIALISATION : Lit une contrainte MBSE et génère physiquement le validateur Rust sur le disque.
+pub async fn generate_constraint_validator(
+    constraint_handle: &str,
+    domain: &str,
+    db: &str,
+    storage: &StorageEngine,
+    is_test_mode: bool,
+) -> RaiseResult<String> {
+    crate::user_info!(
+        "CODEGEN_CONSTRAINT_START",
+        json_value!({"constraint": constraint_handle})
+    );
+
+    // 1. Chargement de l'élément abstrait via le ModelLoader existant
+    let loader = ModelLoader::new(storage, domain, db)?;
+    let element = match loader.get_element(constraint_handle).await {
+        Ok(el) => el,
+        Err(e) => raise_error!(
+            "ERR_CODEGEN_CONSTRAINT_NOT_FOUND",
+            error = format!(
+                "Impossible de charger la contrainte '{}'.",
+                constraint_handle
+            ),
+            context = json_value!({"technical": e.to_string()})
+        ),
+    };
+
+    // 2. Génération du code source en mémoire (Notre générateur de l'Étape 5)
+    let source_code = ConstraintValidatorGenerator::generate_rust_validator(&element)?;
+
+    // 3. Résolution du chemin physique sécurisé (Production vs Sandbox)
+    let domain_root = resolve_domain_root(is_test_mode);
+
+    // 4. Définition du chemin cible dans l'arborescence
+    // On matérialise les règles dans un dossier dédié "generated" pour séparer la loi du code métier manuel.
+    let target_dir = domain_root.join("crates/raise-core/src/validators/generated");
+
+    if let Err(e) = crate::utils::io::fs::create_dir_all_async(&target_dir).await {
+        raise_error!("ERR_CODEGEN_FS_DIR", error = e.to_string());
+    }
+
+    let file_name = format!("{}.rs", constraint_handle.to_lowercase());
+    let target_path = target_dir.join(&file_name);
+
+    // 5. Écriture physique sur le disque (I/O Asynchrone)
+    if let Err(e) = crate::utils::io::fs::write_async(&target_path, source_code.as_bytes()).await {
+        raise_error!("ERR_CODEGEN_FS_WRITE", error = e.to_string());
+    }
+
+    crate::user_success!(
+        "SUC_CODEGEN_CONSTRAINT_DONE",
+        json_value!({
+            "constraint": constraint_handle,
+            "path": target_path.to_string_lossy().to_string()
+        })
+    );
+
+    Ok(target_path.to_string_lossy().to_string())
 }

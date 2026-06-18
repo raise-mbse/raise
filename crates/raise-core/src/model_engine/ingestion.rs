@@ -3,6 +3,8 @@
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::model_engine::arcadia::element_kind::ArcadiaSemantics;
 use crate::model_engine::capella::model_reader::CapellaReader;
+use crate::model_engine::eurlex::parser::EurlexParser;
+use crate::model_engine::transformers::eurlex_to_model::EurlexToModelTransformer;
 use crate::model_engine::types::ProjectModel;
 use crate::utils::prelude::*; // 🎯 Façade Unique RAISE
 
@@ -41,6 +43,50 @@ impl ModelIngestionService {
 
         // 2. Persistance dans le Graphe de Données
         Self::persist_model(&model, manager).await
+    }
+
+    /// Ingestion asynchrone d'une directive européenne (EUR-Lex XML)
+    /// Extrait les seuils réglementaires et les mute en contraintes Arcadia.
+    pub async fn ingest_eurlex(
+        path: PathBuf,
+        manager: &CollectionsManager<'_>,
+    ) -> RaiseResult<usize> {
+        user_info!(
+            "INF_INGESTION_EURLEX_START",
+            json_value!({"path": path.to_string_lossy()})
+        );
+
+        // 1. Délégation du parsing XML au pool CPU (Zéro Dette : on ne bloque pas l'Event Loop)
+        let path_clone = path.clone();
+        let parse_result = spawn_cpu_task(move || EurlexParser::parse_xml(&path_clone)).await;
+
+        let parsed_data = match parse_result {
+            Ok(res) => match res {
+                Ok(data) => data,
+                Err(e) => return Err(e), // L'erreur est déjà structurée par le parseur
+            },
+            Err(e) => raise_error!(
+                "ERR_INGESTION_EURLEX_CRITICAL",
+                error = e.to_string(),
+                context = json_value!({"action": "spawn_cpu_task"})
+            ),
+        };
+
+        // 2. Transformation Sémantique (Données brutes -> Ontologie Arcadia)
+        let model = EurlexToModelTransformer::transform_to_model(&parsed_data)?;
+
+        // 3. Persistance dans le Jumeau Numérique via le manager (Méthode existante et testée)
+        let elements_inserted = Self::persist_model(&model, manager).await?;
+
+        user_success!(
+            "SUC_INGESTION_EURLEX_DONE",
+            json_value!({
+                "message": "Directive ingérée avec succès",
+                "elements_inserted": elements_inserted
+            })
+        );
+
+        Ok(elements_inserted)
     }
 
     /// Hydratation du Knowledge Graph (JSON-DB) à partir d'un modèle en mémoire.
@@ -203,5 +249,86 @@ mod tests {
             }
             _ => panic!("L'ingestion aurait dû lever ERR_INGESTION_COLLECTION_SETUP"),
         }
+    }
+
+    // =========================================================================
+    // TESTS : INGESTION EUR-LEX (Directive 2026/288)
+    // =========================================================================
+
+    #[async_test]
+    async fn test_ingest_eurlex_success_end_to_end() -> RaiseResult<()> {
+        use crate::utils::io::fs::{tempdir, write_async};
+        use crate::utils::testing::mock::AgentDbSandbox;
+
+        // 1. Initialisation du Jumeau Numérique Stérile
+        let sandbox = AgentDbSandbox::new().await?;
+        let manager = CollectionsManager::new(
+            &sandbox.db,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+
+        // 2. Création du fichier XML fictif
+        let dir = tempdir().unwrap();
+        let xml_path = dir.path().join("directive_renure_mock.xml");
+        let xml_content = r#"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <document>
+            <oj-normal>L'utilisation de matières fertilisantes RENURE est autorisée.</oj-normal>
+            <oj-normal>La limite est établie à 80 kg par hectare.</oj-normal>
+            <oj-normal>Ne pas dépasser en cuivre (Cu): 300 mg.</oj-normal>
+            <oj-normal>Ne pas dépasser en zinc (Zn): 800 mg.</oj-normal>
+        </document>
+        "#;
+        write_async(&xml_path, xml_content.as_bytes())
+            .await
+            .unwrap();
+
+        // 3. Exécution de l'orchestration (Parseur -> Transformateur -> Base de données)
+        let inserted_count = ModelIngestionService::ingest_eurlex(xml_path, &manager).await?;
+
+        // 4. Assertion d'orchestration : Le pipeline a bien traité et persisté l'Exigence et la Contrainte
+        assert_eq!(
+            inserted_count, 2,
+            "L'orchestrateur d'ingestion doit avoir traité et persisté exactement 2 éléments."
+        );
+
+        Ok(())
+    }
+
+    #[async_test]
+    async fn test_ingest_eurlex_file_not_found_resilience() -> RaiseResult<()> {
+        use crate::utils::testing::mock::AgentDbSandbox;
+
+        // 1. Initialisation Sandbox
+        let sandbox = AgentDbSandbox::new().await?;
+
+        // 🎯 CORRECTIF : Utilisation des points de montage officiels de la Sandbox
+        let manager = CollectionsManager::new(
+            &sandbox.db,
+            &sandbox.config.mount_points.modeling.domain,
+            &sandbox.config.mount_points.modeling.db,
+        );
+
+        // 2. Ciblage d'un chemin invalide
+        let fake_path = PathBuf::from("/chemin/vers/une/directive/inexistante.xml");
+
+        // 3. Exécution
+        let result = ModelIngestionService::ingest_eurlex(fake_path, &manager).await;
+
+        // 4. Assertions
+        assert!(
+            result.is_err(),
+            "L'ingestion d'un fichier inexistant devrait échouer."
+        );
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ERR_EURLEX_FILE"),
+            "L'erreur remontée doit provenir du module parseur EUR-Lex. Erreur reçue : {}",
+            err_msg
+        );
+
+        Ok(())
     }
 }
