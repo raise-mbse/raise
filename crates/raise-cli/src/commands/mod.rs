@@ -12,6 +12,7 @@ pub mod plugins;
 pub mod rules;
 pub mod spatial;
 pub mod traceability;
+pub mod training;
 pub mod utils;
 pub mod validator;
 pub mod workflow;

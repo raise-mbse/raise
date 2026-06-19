@@ -10,11 +10,13 @@ pub use encoder::ArcadiaEncoder;
 mod tests {
     use super::*;
     use crate::model_engine::arcadia::element_kind::Layer;
+    use crate::utils::prelude::*; // 🎯 FIX : Import du prélude pour accéder à ComputeHardware
 
     #[test]
     fn test_perception_public_api() {
         // Ce test vérifie que l'API publique est bien accessible depuis le module
-        let result = ArcadiaEncoder::encode_layer(Layer::Data);
+        // 🎯 FIX : Injection du device CPU pour le test
+        let result = ArcadiaEncoder::encode_layer(Layer::Data, &ComputeHardware::Cpu);
 
         assert!(
             result.is_ok(),

@@ -46,6 +46,7 @@ impl GcnLayer {
         alpha: f64,
         varmap: &mut NeuralWeightsMap,
         device: &ComputeHardware,
+        prefix: &str,
     ) -> RaiseResult<()> {
         // Le clone() de NeuralLinearLayer est Zéro-Copy (pointeurs Arc Candle internes)
         let lora = crate::ai::training::lora::LoraLinear::new(
@@ -54,6 +55,7 @@ impl GcnLayer {
             alpha,
             varmap,
             device,
+            prefix,
         )?;
 
         self.lora_adapter = Some(lora);

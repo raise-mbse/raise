@@ -53,7 +53,7 @@ impl HybridEncoder {
         device: &ComputeHardware,
     ) -> RaiseResult<NeuralTensor> {
         // 1. Perception Structurelle Pure (Zéro Dette) -> [1, 16]
-        let t_structure = ArcadiaEncoder::encode_element(element)?;
+        let t_structure = ArcadiaEncoder::encode_element(element, device)?;
 
         // 2. Conversion du vecteur NLP en Tenseur -> [1, 384]
         let nlp_dim = nlp_embedding.len();
@@ -94,7 +94,7 @@ pub struct ArcadiaEncoder;
 
 impl ArcadiaEncoder {
     /// Encode la couche (Layer) en vecteur One-Hot [1, 8]
-    pub fn encode_layer(layer: Layer) -> RaiseResult<NeuralTensor> {
+    pub fn encode_layer(layer: Layer, device: &ComputeHardware) -> RaiseResult<NeuralTensor> {
         let index = match layer {
             Layer::OperationalAnalysis => 0,
             Layer::SystemAnalysis => 1,
@@ -102,15 +102,18 @@ impl ArcadiaEncoder {
             Layer::PhysicalArchitecture => 3,
             Layer::EPBS => 4,
             Layer::Data => 5,
-            Layer::Transverse => 6, // AJOUT
+            Layer::Transverse => 6,
             Layer::Unknown => 7,
         };
 
-        Self::one_hot(index, LAYER_DIM)
+        Self::one_hot(index, LAYER_DIM, device)
     }
 
     /// Encode la catégorie fonctionnelle en vecteur One-Hot [1, 8]
-    pub fn encode_category(category: ElementCategory) -> RaiseResult<NeuralTensor> {
+    pub fn encode_category(
+        category: ElementCategory,
+        device: &ComputeHardware,
+    ) -> RaiseResult<NeuralTensor> {
         let index = match category {
             ElementCategory::Component => 0,
             ElementCategory::Function => 1,
@@ -122,19 +125,22 @@ impl ArcadiaEncoder {
             ElementCategory::Other => 7,
         };
 
-        Self::one_hot(index, CATEGORY_DIM)
+        Self::one_hot(index, CATEGORY_DIM, device)
     }
 
     /// Encode un élément complet (Concaténation Layer + Category)
     /// Dimension de sortie : [1, 16] (8 + 8)
-    pub fn encode_element(element: &ArcadiaElement) -> RaiseResult<NeuralTensor> {
+    pub fn encode_element(
+        element: &ArcadiaElement,
+        device: &ComputeHardware,
+    ) -> RaiseResult<NeuralTensor> {
         // 1. Extraction sémantique
         let layer = element.get_layer();
         let category = element.get_category();
 
         // 2. Encodage individuel (délégué aux sous-fonctions RAISE-safe)
-        let t_layer = Self::encode_layer(layer)?;
-        let t_cat = Self::encode_category(category)?;
+        let t_layer = Self::encode_layer(layer, device)?;
+        let t_cat = Self::encode_category(category, device)?;
 
         // 3. Concaténation (Feature Fusion)
         let t_combined = match NeuralTensor::cat(&[&t_layer, &t_cat], 1) {
@@ -145,8 +151,7 @@ impl ArcadiaEncoder {
                 context = json_value!({
                     "layer_shape": format!("{:?}", t_layer.shape()),
                     "category_shape": format!("{:?}", t_cat.shape()),
-                    "action": "concatenate_features",
-                    "hint": "Les dimensions des tenseurs encodés ne sont pas compatibles pour la fusion. Vérifiez les dimensions de sortie de 'encode_layer' et 'encode_category'."
+                    "action": "concatenate_features"
                 })
             ),
         };
@@ -155,14 +160,14 @@ impl ArcadiaEncoder {
     }
 
     /// Helper pour générer un vecteur One-Hot
-    fn one_hot(index: usize, size: usize) -> RaiseResult<NeuralTensor> {
+    fn one_hot(index: usize, size: usize, device: &ComputeHardware) -> RaiseResult<NeuralTensor> {
         let mut data = vec![0f32; size];
         if index < size {
             data[index] = 1.0;
         }
 
-        // Utilisation d'un match pour une extraction de type NeuralTensor sans "oignon de Result"
-        match NeuralTensor::from_vec(data, (1, size), &ComputeHardware::Cpu) {
+        // 🎯 FIX ABSOLU : Le CPU n'est plus codé en dur !
+        match NeuralTensor::from_vec(data, (1, size), device) {
             Ok(t) => Ok(t),
             Err(e) => raise_error!(
                 "ERR_AI_ENCODER_ONE_HOT_FAILED",
@@ -170,8 +175,7 @@ impl ArcadiaEncoder {
                 context = json_value!({
                     "index": index,
                     "size": size,
-                    "device": "cpu",
-                    "hint": "Échec de la création du vecteur One-Hot. Vérifiez si la taille demandée est compatible avec la mémoire disponible."
+                    "hint": "Échec de la création du vecteur One-Hot."
                 })
             ),
         }
@@ -195,8 +199,8 @@ mod tests {
 
     #[test]
     fn test_encode_layer_sa() {
-        // SA est l'index 1 -> [0, 1, 0, 0, 0, 0, 0, 0]
-        let t = ArcadiaEncoder::encode_layer(Layer::SystemAnalysis).unwrap();
+        // 🎯 FIX : Ajout du device manquant pour le test
+        let t = ArcadiaEncoder::encode_layer(Layer::SystemAnalysis, &ComputeHardware::Cpu).unwrap();
         let vec: Vec<f32> = t.to_vec2::<f32>().unwrap()[0].clone();
 
         assert_eq!(vec.len(), LAYER_DIM);
@@ -206,8 +210,9 @@ mod tests {
 
     #[test]
     fn test_encode_category_function() {
-        // Function est l'index 1 -> [0, 1, 0, 0, 0, 0, 0, 0]
-        let t = ArcadiaEncoder::encode_category(ElementCategory::Function).unwrap();
+        // 🎯 FIX : Ajout du device manquant pour le test
+        let t = ArcadiaEncoder::encode_category(ElementCategory::Function, &ComputeHardware::Cpu)
+            .unwrap();
         let vec: Vec<f32> = t.to_vec2::<f32>().unwrap()[0].clone();
 
         assert_eq!(vec.len(), CATEGORY_DIM);
@@ -216,25 +221,15 @@ mod tests {
 
     #[test]
     fn test_encode_full_element() {
-        // Un LogicalComponent dans LA
-        // Layer LA = index 2
-        // Category Component = index 0
-        // NOTE: On utilise une URI valide pour passer la validation stricte de element_kind.rs
         let el = make_element("https://raise.io/ontology/arcadia/la#LogicalComponent");
 
-        let t = ArcadiaEncoder::encode_element(&el).unwrap();
+        // 🎯 FIX : Ajout du device manquant pour le test
+        let t = ArcadiaEncoder::encode_element(&el, &ComputeHardware::Cpu).unwrap();
         let vec: Vec<f32> = t.to_vec2::<f32>().unwrap()[0].clone();
 
         // Taille totale attendue : 8 + 8 = 16
         assert_eq!(vec.len(), LAYER_DIM + CATEGORY_DIM);
-
-        // Vérif Layer part (index 2)
         assert_eq!(vec[2], 1.0, "Layer index 2 (LA) doit être 1.0");
-
-        // Vérif Category part.
-        // LAYER_DIM est 8.
-        // Category Component est index 0 localement.
-        // Index global = 8 + 0 = 8.
         assert_eq!(
             vec[8], 1.0,
             "Category index 0 (Component) décalé de 8 doit être 1.0"
@@ -247,12 +242,8 @@ mod tests {
         let varmap = NeuralWeightsMap::new();
         let vb = NeuralWeightsBuilder::from_varmap(&varmap, ComputeType::F32, &device);
 
-        // nlp_dim = 384 (FastEmbed), semantic_dim = 16
         let hybrid_encoder = HybridEncoder::new(384, 16, vb).unwrap();
-
         let el = make_element("https://raise.io/ontology/arcadia/la#LogicalFunction");
-
-        // Mock d'un vecteur NLP issu de fast.rs
         let mock_nlp_vec = vec![0.5f32; 384];
 
         let combined_tensor = hybrid_encoder
@@ -260,7 +251,6 @@ mod tests {
             .unwrap();
         let dims = combined_tensor.dims();
 
-        // Vérification de la dimension : [Batch=1, Features = 16 (Struct) + 16 (NLP) = 32]
         assert_eq!(
             dims,
             &[1, 32],

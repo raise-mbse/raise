@@ -13,12 +13,9 @@ use raise_core::json_db::collections::manager::CollectionsManager;
 
 use raise_core::ai::context::rag::RagRetriever;
 use raise_core::ai::llm::client::LlmClient;
-use raise_core::ai::nlp::parser::CommandType;
-use raise_core::ai::orchestrator::AiOrchestrator;
-use raise_core::ai::training::ai_train_domain_native;
+
 use raise_core::ai::voice::stt::WhisperEngine;
-use raise_core::model_engine::types::ProjectModel;
-use raise_core::model_engine::types::{ArcadiaElement, NameType};
+
 use raise_core::utils::data::json::Clearance;
 use raise_core::utils::io::audio::AudioListener;
 
@@ -60,26 +57,6 @@ pub enum AiCommands {
         reference: String,
     },
 
-    /// 🧠 Entraîne un adaptateur LoRA pour un domaine spécifique en local
-    #[command(visible_alias = "t")]
-    Train {
-        /// Forcer le domaine à entraîner (écrase la config utilisateur)
-        #[arg(short, long)]
-        domain: Option<String>,
-
-        /// Forcer la DB à utiliser
-        #[arg(long)]
-        db: Option<String>,
-
-        /// Forcer le nombre d'époques (ex: 5)
-        #[arg(short, long)]
-        epochs: Option<usize>,
-
-        /// Forcer le taux d'apprentissage (ex: 0.001)
-        #[arg(short, long)]
-        lr: Option<f64>,
-    },
-
     /// 🕸️ Valide mathématiquement une allocation MBSE via le GNN
     #[command(visible_alias = "v")]
     Validate {
@@ -106,14 +83,6 @@ pub enum AiCommands {
     Orchestrate {
         /// La demande métier (ex: "Conçois le système de freinage")
         prompt: String,
-    },
-
-    /// 🌍 Entraîne le Moteur Neuro-Symbolique (World Model)
-    #[command(visible_alias = "tw")]
-    TrainWorld {
-        /// Nombre d'itérations d'entraînement
-        #[arg(short, long, default_value = "50")]
-        iterations: usize,
     },
 
     /// 🚀 Exécuter un prompt stocké dans la base (Data-Driven)
@@ -227,43 +196,9 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
     let command = args.command.unwrap_or(AiCommands::Interactive);
 
     // 2. EXÉCUTION DES COMMANDES SANS LLM (GNN et Entraînement Local)
-    match &command {
-        AiCommands::Train {
-            domain,
-            db: target_db,
-            epochs,
-            lr,
-        } => {
-            let final_domain = domain.clone().unwrap_or_else(|| ctx.active_domain.clone());
-            let final_db = target_db.clone().unwrap_or_else(|| ctx.active_db.clone());
-            let final_epochs = epochs.unwrap_or(3);
-            let final_lr = lr.unwrap_or(0.001);
-
-            user_info!(
-                "AI_TRAINING_START",
-                json_value!({ "domain": final_domain, "db": final_db, "lr": final_lr, "epochs": final_epochs })
-            );
-
-            let manager = raise_core::json_db::collections::manager::CollectionsManager::new(
-                &storage,
-                &ctx.active_domain,
-                &final_db,
-            );
-
-            match ai_train_domain_native(&manager, &final_domain, final_epochs, final_lr).await {
-                Ok(msg) => user_success!("AI_TRAIN_SUCCESS", json_value!({ "result": msg })),
-                Err(e) => user_error!(
-                    "AI_TRAIN_FAIL",
-                    json_value!({ "error": e.to_string(), "action": "neural_network_training" })
-                ),
-            }
-            return Ok(());
-        }
-        AiCommands::Validate { uri_a, uri_b } => {
-            run_gnn_validation(&domain_path, uri_a, uri_b).await?;
-            return Ok(());
-        }
-        _ => {}
+    if let AiCommands::Validate { uri_a, uri_b } = &command {
+        run_gnn_validation(&domain_path, uri_a, uri_b).await?;
+        return Ok(());
     }
 
     // 3. CHARGEMENT TARDIF DU LLM ET DU CONTEXTE AGENT (Mode Interactif & NLP)
@@ -475,10 +410,6 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
                 }
                 Err(e) => user_error!("AI_HEALTH_FAILED", json_value!({ "error": e.to_string() })),
             }
-        }
-
-        AiCommands::TrainWorld { iterations } => {
-            run_train_world_action(ctx.storage.clone(), &manager, iterations).await?;
         }
 
         AiCommands::Execute {
@@ -866,70 +797,6 @@ async fn inspect_agent_logic(
     Ok(())
 }
 
-async fn run_train_world_action(
-    storage: SharedRef<raise_core::json_db::storage::StorageEngine>,
-    manager: &raise_core::json_db::collections::manager::CollectionsManager<'_>,
-    iterations: usize,
-) -> RaiseResult<()> {
-    user_info!(
-        "AI_WORLD_TRAIN_START",
-        json_value!({"iterations": iterations})
-    );
-
-    println!("⏳ Réveil de l'Orchestrateur et du Moteur Neuro-Symbolique...");
-    let orchestrator = AiOrchestrator::new(ProjectModel::default(), manager, storage, None).await?;
-
-    println!("\n🌍 --- ENTRAÎNEMENT DU WORLD MODEL (NEURO-SYMBOLIQUE) ---");
-    println!("🧠 Scénario : Apprentissage de la transition d'un composant Logique (LA) vers Physique (PA).");
-
-    let state_before = ArcadiaElement {
-        id: "comp_logic_1".into(),
-        name: NameType::default(),
-        kind: "https://raise.io/ontology/arcadia/la#LogicalComponent".into(),
-        properties: raise_core::utils::data::UnorderedMap::new(),
-    };
-
-    let state_after = ArcadiaElement {
-        id: "comp_phys_1".into(),
-        name: NameType::default(),
-        kind: "https://raise.io/ontology/arcadia/pa#PhysicalComponent".into(),
-        properties: raise_core::utils::data::UnorderedMap::new(),
-    };
-
-    let mut initial_loss = 0.0;
-    let mut final_loss = 0.0;
-
-    for i in 1..=iterations {
-        let loss = orchestrator
-            .reinforce_learning(&state_before, CommandType::Create, &state_after)
-            .await?;
-
-        if i == 1 {
-            initial_loss = loss;
-            println!("📉 Loss initiale (Itération 1) : {:.6}", initial_loss);
-        } else if i % 10 == 0 || i == iterations {
-            println!("📉 Loss (Itération {:>2}) : {:.6}", i, loss);
-        }
-        final_loss = loss;
-    }
-
-    println!("\n✅ Entraînement terminé !");
-    println!("   Loss Initiale : {:.6}", initial_loss);
-    println!("   Loss Finale   : {:.6}", final_loss);
-
-    if initial_loss > 0.0 {
-        let improvement = ((initial_loss - final_loss) / initial_loss) * 100.0;
-        println!("   Amélioration  : {:.2}%", improvement);
-    }
-
-    user_success!(
-        "AI_WORLD_TRAIN_SUCCESS",
-        json_value!({"final_loss": final_loss})
-    );
-
-    Ok(())
-}
-
 async fn run_execute_action(
     ctx: &CliContext,
     client: LlmClient,
@@ -1109,39 +976,6 @@ mod tests {
             "ref:agents:handle:agent_business"
         );
         Ok(())
-    }
-
-    #[async_test]
-    #[serial_test::serial]
-    #[cfg_attr(not(feature = "cuda"), ignore)]
-    async fn test_ai_train_parsing() -> RaiseResult<()> {
-        mock::inject_mock_config().await;
-
-        let cli = match TestCli::try_parse_from(vec![
-            "test", "train", "--domain", "safety", "--epochs", "10",
-        ]) {
-            Ok(c) => c,
-            Err(e) => raise_error!("ERR_TEST_PARSE", error = e.to_string()),
-        };
-
-        if let Some(AiCommands::Train {
-            domain,
-            epochs,
-            db,
-            lr,
-        }) = cli.args.command
-        {
-            assert_eq!(domain.unwrap(), "safety");
-            assert_eq!(epochs.unwrap(), 10);
-            assert!(db.is_none());
-            assert!(lr.is_none());
-            Ok(())
-        } else {
-            raise_error!(
-                "ERR_TEST_ASSERTION_FAILED",
-                error = "Échec du parsing de la commande Train"
-            )
-        }
     }
 
     #[async_test]

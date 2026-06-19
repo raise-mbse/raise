@@ -40,8 +40,10 @@ impl ArcadiaGnnModel {
         varmap: &mut NeuralWeightsMap,
         device: &ComputeHardware,
     ) -> RaiseResult<()> {
-        self.layer1.inject_lora(rank, alpha, varmap, device)?;
-        self.layer2.inject_lora(rank, alpha, varmap, device)?;
+        self.layer1
+            .inject_lora(rank, alpha, varmap, device, "layer1")?;
+        self.layer2
+            .inject_lora(rank, alpha, varmap, device, "layer2")?;
 
         user_info!(
             "MSG_GNN_LORA_INJECTED",

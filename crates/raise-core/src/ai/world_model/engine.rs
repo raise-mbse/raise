@@ -124,13 +124,20 @@ impl NeuroSymbolicEngine {
         element: &ArcadiaElement,
         action: WorldAction,
     ) -> RaiseResult<NeuralTensor> {
-        let raw_perception = ArcadiaEncoder::encode_element(element)?;
+        // 🎯 FIX ABSOLU : On détermine le device en amont en lisant la config du World Model
+        let device = if self.config.use_gpu {
+            AppConfig::device()
+        } else {
+            &ComputeHardware::Cpu
+        };
+
+        // On passe le device à l'encodeur structurel
+        let raw_perception = ArcadiaEncoder::encode_element(element, device)?;
         let token = self.quantizer.tokenize(&raw_perception)?;
         let state_quantized = self.quantizer.decode(&token)?;
 
-        // 🎯 FIX : On passe le device du tenseur d'état pour rester dans le même espace mémoire
-        let device = state_quantized.device();
-        let action_tensor = action.to_tensor(self.config.action_dim, device)?;
+        // On s'assure de l'alignement strict : l'action prend le device exact de l'état quantifié
+        let action_tensor = action.to_tensor(self.config.action_dim, state_quantized.device())?;
 
         match self.predictor.forward(&state_quantized, &action_tensor) {
             Ok(future) => Ok(future),

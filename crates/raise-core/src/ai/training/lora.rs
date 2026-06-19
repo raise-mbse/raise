@@ -1,3 +1,5 @@
+// FICHIER : crates/raise-core/src/ai/training/lora.rs
+
 use crate::utils::prelude::*;
 
 pub struct LoraLinear {
@@ -14,22 +16,26 @@ impl LoraLinear {
         alpha: f64,
         varmap: &mut NeuralWeightsMap,
         device: &ComputeHardware,
+        prefix: &str, // 🎯 FIX : Réception du préfixe
     ) -> RaiseResult<Self> {
         let (out_dims, in_dims) = old_linear.weight().shape().dims2()?;
         let dtype = old_linear.weight().dtype();
 
         // lora_a : [Out, Rank]
+        // 🎯 FIX : Concaténation du préfixe pour garantir l'unicité dans la VRAM
         let lora_a = varmap.get(
             (out_dims, rank),
-            "lora_a",
+            &format!("{}.lora_a", prefix),
             NeuralInitStrategy::DEFAULT_KAIMING_NORMAL,
             dtype,
             device,
         )?;
+
         // lora_b : [Rank, In]
+        // 🎯 FIX : Concaténation du préfixe
         let lora_b = varmap.get(
             (rank, in_dims),
-            "lora_b",
+            &format!("{}.lora_b", prefix),
             NeuralInitStrategy::ZERO,
             dtype,
             device,
@@ -78,7 +84,8 @@ mod tests {
         let bias = NeuralTensor::zeros(20, ComputeType::F32, &device)?;
         let linear = NeuralLinearLayer::new(weight, Some(bias));
 
-        let lora = LoraLinear::new(linear, 4, 1.0, &mut varmap, &device)?;
+        // 🎯 FIX : Ajout du préfixe "test_layer"
+        let lora = LoraLinear::new(linear, 4, 1.0, &mut varmap, &device, "test_layer")?;
 
         // Input [1, 10]
         let input = NeuralTensor::ones((1, 10), ComputeType::F32, &device)?;

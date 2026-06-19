@@ -11,6 +11,7 @@ use crate::utils::prelude::*; // 🎯 Façade Unique
 pub struct CodeGenTool {
     service: CodeGeneratorService,
     tool_def: ToolDefinition, // Cache de la définition générée dynamiquement via les schémas
+    domain_root: PathBuf,
 }
 
 impl CodeGenTool {
@@ -22,7 +23,7 @@ impl CodeGenTool {
         db_name: &str,
     ) -> RaiseResult<Self> {
         let manager = CollectionsManager::new(&db, space, db_name);
-        let service = CodeGeneratorService::new(domain_root, &manager).await?;
+        let service = CodeGeneratorService::new(domain_root.clone(), &manager).await?;
 
         // 1. Lecture stricte
         let mcp_config =
@@ -128,7 +129,11 @@ impl CodeGenTool {
             input_schema: schema_doc,
         };
 
-        Ok(Self { service, tool_def })
+        Ok(Self {
+            service,
+            tool_def,
+            domain_root,
+        })
     }
 }
 
@@ -253,14 +258,15 @@ impl McpTool for CodeGenTool {
             metadata: meta,
         };
 
+        let module_path = self.domain_root.join(format!("{}_staged.rs", module_name));
+
         let mut target_module = match Module::new(
             module_name,
-            PathBuf::from(format!("{}_staged.rs", module_name)),
+            module_path, // Utilisation du chemin absolu
         ) {
             Ok(m) => m,
             Err(e) => return McpToolResult::error(call.id, &e.to_string()),
         };
-
         target_module.elements.push(mutated_element);
 
         match self.service.stage_module(target_module).await {

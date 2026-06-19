@@ -111,8 +111,12 @@ impl AiOrchestrator {
         };
 
         // 🎯 Initialisation de l'HybridEncoder (On lie ses poids à la varmap du WorldModel !)
-        let device = AppConfig::device(); // 🎯 FIX : Résolution dynamique
-        let vb = NeuralWeightsBuilder::from_varmap(&world_engine.varmap, ComputeType::F32, device);
+        let active_device = AppConfig::device(); // 🎯 FIX : Résolution dynamique
+        let vb = NeuralWeightsBuilder::from_varmap(
+            &world_engine.varmap,
+            ComputeType::F32,
+            active_device,
+        );
 
         let hybrid_encoder = match HybridEncoder::new(384, 16, vb) {
             Ok(enc) => enc,
