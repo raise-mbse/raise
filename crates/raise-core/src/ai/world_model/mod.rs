@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/ai/world_model/mod.rs
+// FICHIER : crates/raise-core/src/ai/world_model/mod.rs
 
 pub mod dynamics;
 pub mod engine;

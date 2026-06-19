@@ -72,8 +72,8 @@ impl AiOrchestrator {
                     "WRN_WORLD_MODEL_LOAD_FAILED",
                     json_value!({ "error": e.to_string(), "hint": "Démarrage avec un modèle vierge." })
                 );
-
-                // Récupération de la config mockée/locale avec sécurisation
+                let active_device = AppConfig::device();
+                let is_gpu = active_device.is_cuda() || active_device.is_metal();
                 // Récupération de la config mockée/locale avec sécurisation
                 let wm_config = match AppConfig::get_runtime_settings(
                     manager,
@@ -89,7 +89,7 @@ impl AiOrchestrator {
                                 embedding_dim: 32,
                                 action_dim: 5,
                                 hidden_dim: 64,
-                                use_gpu: false,
+                                use_gpu: is_gpu,
                             });
                         // 🎯 AUTO-HEALING : On écrase la config de test obsolète
                         if cfg.embedding_dim != 32 {
@@ -102,7 +102,7 @@ impl AiOrchestrator {
                         embedding_dim: 32,
                         action_dim: 5,
                         hidden_dim: 64,
-                        use_gpu: false,
+                        use_gpu: is_gpu,
                     },
                 };
 
@@ -111,11 +111,8 @@ impl AiOrchestrator {
         };
 
         // 🎯 Initialisation de l'HybridEncoder (On lie ses poids à la varmap du WorldModel !)
-        let vb = NeuralWeightsBuilder::from_varmap(
-            &world_engine.varmap,
-            ComputeType::F32,
-            &ComputeHardware::Cpu,
-        );
+        let device = AppConfig::device(); // 🎯 FIX : Résolution dynamique
+        let vb = NeuralWeightsBuilder::from_varmap(&world_engine.varmap, ComputeType::F32, device);
 
         let hybrid_encoder = match HybridEncoder::new(384, 16, vb) {
             Ok(enc) => enc,
@@ -297,23 +294,24 @@ impl AiOrchestrator {
         intent: CommandType,
         state_after: &ArcadiaElement,
     ) -> RaiseResult<f64> {
-        let device = ComputeHardware::Cpu;
+        // 🎯 FIX ABSOLU : Résolution dynamique du device (au lieu de ComputeHardware::Cpu)
+        let device = AppConfig::device();
 
         // 1. Récupération des embeddings NLP mis en cache
         let nlp_before = self.get_cached_embedding(state_before).await?;
         let nlp_after = self.get_cached_embedding(state_after).await?;
 
         // 2. Encodage Hybride (Struct + NLP)
-        let tensor_before =
-            self.hybrid_encoder
-                .encode_hybrid(state_before, &nlp_before, &device)?;
+        let tensor_before = self
+            .hybrid_encoder
+            .encode_hybrid(state_before, &nlp_before, device)?;
         let tensor_after = self
             .hybrid_encoder
-            .encode_hybrid(state_after, &nlp_after, &device)?;
+            .encode_hybrid(state_after, &nlp_after, device)?;
 
         // 3. Transformation de l'action
         let action_obj = WorldAction { intent };
-        let action_tensor = action_obj.to_tensor(self.world_engine.config.action_dim)?;
+        let action_tensor = action_obj.to_tensor(self.world_engine.config.action_dim, device)?;
 
         // 4. Entraînement Mathématique Pur (Totalement agnostique)
         let mut trainer = match WorldTrainer::new(&self.world_engine, 0.01) {

@@ -70,18 +70,14 @@ impl GraphFeatures {
         }
 
         let expected_dim = vectors[0].len();
-        let mut flat_data: Vec<f32> = Vec::with_capacity(n_nodes * expected_dim);
+        let flat_data: Vec<f32> = vectors.into_iter().flatten().collect();
 
-        for (i, vector) in vectors.into_iter().enumerate() {
-            if vector.len() != expected_dim {
-                raise_error!(
-                    "ERR_GNN_DIMENSION_MISMATCH",
-                    error = "Incohérence des dimensions d'embedding.",
-                    context =
-                        json_value!({ "expected": expected_dim, "got": vector.len(), "index": i })
-                );
-            }
-            flat_data.extend(vector);
+        if flat_data.len() != n_nodes * expected_dim {
+            raise_error!(
+                "ERR_GNN_DIMENSION_MISMATCH",
+                error = "Incohérence des dimensions d'embedding détectée lors de l'aplatissement.",
+                context = json_value!({ "expected_total": n_nodes * expected_dim, "got": flat_data.len() })
+            );
         }
 
         let device_clone = device.clone();

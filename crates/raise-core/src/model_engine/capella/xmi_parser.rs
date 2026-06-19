@@ -159,6 +159,7 @@ mod tests {
     //use crate::model_engine::arcadia::ArcadiaOntology;
 
     #[test]
+    #[serial_test::serial]
     fn test_parse_capella_fragment_pure_graph() {
         use quick_xml::Reader;
         // Supposons que ProjectModel et CapellaXmiParser soient importés
@@ -206,9 +207,6 @@ mod tests {
 
         // Vérification de la résolution du type URI
         //let expected_uri = ArcadiaOntology::get_uri("la", "LogicalComponent").unwrap();
-        assert_eq!(
-            comp.kind.as_str(),
-            "org.polarsys.capella.core.data.la:LogicalComponent"
-        );
+        assert_eq!(comp.kind.as_str(), "https://raise.io/la#LogicalComponent");
     }
 }

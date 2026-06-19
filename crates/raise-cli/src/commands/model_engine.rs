@@ -107,7 +107,7 @@ pub async fn handle(args: ModelArgs, ctx: CliContext) -> RaiseResult<()> {
                 &ctx.active_db,
                 &path,
             )
-            .await?; 
+            .await?;
 
             user_success!(
                 "CLI_INGEST_EURLEX_DONE",

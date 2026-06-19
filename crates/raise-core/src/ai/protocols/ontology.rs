@@ -71,6 +71,22 @@ impl FmtDisplay for RaiseOntology {
     }
 }
 
+// --- Moteur de Validation Ontologique ---
+
+pub struct OntologyRuleEngine;
+
+impl OntologyRuleEngine {
+    /// Vérifie si un lien (hiérarchique ou transversal) viole le méta-modèle.
+    /// Actuellement configuré pour le Cycle en V d'Arcadia.
+    pub fn is_violation(src: &str, dst: &str) -> bool {
+        matches!(
+            (src, dst),
+            // Règles de violation (Cycle en V inversé)
+            ("pa", "oa") | ("la", "pa") | ("sa", "oa") | ("sa", "pa") // System → Physical sans Logical intermédiaire
+        )
+    }
+}
+
 // =========================================================================
 // TESTS UNITAIRES (Rigueur Ontologique)
 // =========================================================================

@@ -30,6 +30,32 @@ impl ArcadiaGnnModel {
         Ok(Self { layer1, layer2 })
     }
 
+    /// 🎯 INJECTION LORA GLOBALE
+    /// Prépare le modèle GNN pour le Fine-Tuning en gelant les poids d'origine
+    /// et en injectant les matrices de rang faible (A et B) sur toutes les couches.
+    pub fn inject_lora(
+        &mut self,
+        rank: usize,
+        alpha: f64,
+        varmap: &mut NeuralWeightsMap,
+        device: &ComputeHardware,
+    ) -> RaiseResult<()> {
+        self.layer1.inject_lora(rank, alpha, varmap, device)?;
+        self.layer2.inject_lora(rank, alpha, varmap, device)?;
+
+        user_info!(
+            "MSG_GNN_LORA_INJECTED",
+            json_value!({
+                "rank": rank,
+                "alpha": alpha,
+                "status": "active",
+                "layers_patched": 2
+            })
+        );
+
+        Ok(())
+    }
+
     /// Exécute la propagation complète sur le graphe via le Sparse Message Passing.
     /// Utilise les indices des arêtes (edges) plutôt qu'une matrice dense [N, N].
     pub async fn forward(

@@ -7,6 +7,8 @@ use crate::utils::prelude::*;
 pub struct GcnLayer {
     /// Transformation linéaire (Poids W et Biais b)
     pub transform: NeuralLinearLayer,
+    /// 🎯 Adaptateur LoRA optionnel injecté à chaud pour le Fine-Tuning
+    pub lora_adapter: Option<crate::ai::training::lora::LoraLinear>,
     pub in_dim: usize,
     pub out_dim: usize,
 }
@@ -31,22 +33,42 @@ impl GcnLayer {
 
         Ok(Self {
             transform,
+            lora_adapter: None, // Inactif par défaut
             in_dim,
             out_dim,
         })
     }
 
+    /// 🎯 INJECTION LORA : Convertit la couche dense en couche fine-tunable
+    pub fn inject_lora(
+        &mut self,
+        rank: usize,
+        alpha: f64,
+        varmap: &mut NeuralWeightsMap,
+        device: &ComputeHardware,
+    ) -> RaiseResult<()> {
+        // Le clone() de NeuralLinearLayer est Zéro-Copy (pointeurs Arc Candle internes)
+        let lora = crate::ai::training::lora::LoraLinear::new(
+            self.transform.clone(),
+            rank,
+            alpha,
+            varmap,
+            device,
+        )?;
+
+        self.lora_adapter = Some(lora);
+        Ok(())
+    }
+
     /// Exécute la passe avant (Forward Pass) en mode Creux (Sparse).
-    /// H_new = ReLU( Aggregation(H_voisins) * W + b )
     pub async fn forward(
         &self,
-        edge_src: &NeuralTensor, // 🎯 [E] Indices des nœuds sources
-        edge_dst: &NeuralTensor, // 🎯 [E] Indices des nœuds cibles
-        features: &NeuralTensor, // 🎯 [N, D] Matrice des caractéristiques
+        edge_src: &NeuralTensor,
+        edge_dst: &NeuralTensor,
+        features: &NeuralTensor,
     ) -> RaiseResult<NeuralTensor> {
         let feat_dims = features.dims();
 
-        // 1. Validation de l'intégrité
         if feat_dims.len() != 2 {
             raise_error!(
                 "ERR_GNN_INVALID_SHAPE",
@@ -55,29 +77,30 @@ impl GcnLayer {
             );
         }
 
-        // 2. SPARSE MESSAGE PASSING : O(E * D) au lieu de O(N^2 * D)
-        // a. On copie les caractéristiques des nœuds sources
         let h_src = match features.index_select(edge_src, 0) {
             Ok(t) => t,
             Err(e) => raise_error!("ERR_GNN_INDEX_SELECT", error = e),
         };
 
-        // b. On prépare un tenseur vierge [N, D] pour accumuler les messages
         let mut h_agg = match features.zeros_like() {
             Ok(t) => t,
             Err(e) => raise_error!("ERR_GNN_ZEROS_LIKE", error = e),
         };
 
-        // c. On propage et additionne les messages vers les nœuds cibles
         h_agg = match h_agg.index_add(edge_dst, &h_src, 0) {
             Ok(t) => t,
             Err(e) => raise_error!("ERR_GNN_INDEX_ADD", error = e),
         };
 
-        // 3. Transformation Sémantique & Activation : ReLU(Aggregated * W + b)
-        let transformed = match self.transform.forward(&h_agg) {
+        // 🎯 AIGUILLAGE ZÉRO DETTE : LoRA ou Standard
+        let transformed_result = match &self.lora_adapter {
+            Some(lora) => lora.forward(&h_agg),
+            None => self.transform.forward(&h_agg),
+        };
+
+        let transformed = match transformed_result {
             Ok(t) => t,
-            Err(e) => raise_error!("ERR_GNN_LINEAR_TRANSFORM", error = e),
+            Err(e) => raise_error!("ERR_GNN_LINEAR_TRANSFORM", error = e.to_string()),
         };
 
         let activated = match transformed.relu() {

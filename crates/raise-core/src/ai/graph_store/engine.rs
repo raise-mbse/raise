@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/ai/graph_store/engine.rs
+// FICHIER : crates/raise-core/src/ai/graph_store/engine.rs
 
 use crate::ai::deep_learning::models::gnn_model::ArcadiaGnnModel;
 use crate::ai::graph_store::adjacency::GraphAdjacency;
@@ -14,6 +14,10 @@ pub struct GnnEngine {
     /// 🎯 Adjacence stockée à l'initialisation — un seul chargement depuis la DB,
     /// réutilisée à chaque train_step et audit sans I/O supplémentaire.
     pub adj: GraphAdjacency,
+    // 🎯 Caches CPU pour un échantillonnage (Graph Sampling) ultra-rapide sans accès matériel
+    pub cpu_edge_src: Vec<u32>,
+    pub cpu_edge_dst: Vec<u32>,
+    pub current_epoch: usize, // Traqueur pour la fenêtre glissante
 }
 
 impl GnnEngine {
@@ -24,10 +28,18 @@ impl GnnEngine {
         hidden_dim: usize,
         device: &ComputeHardware,
     ) -> RaiseResult<Self> {
-        // 🎯 Construction unique de l'adjacence — stockée dans la struct,
-        // elle ne sera plus jamais reconstruite depuis la DB.
         let adj = GraphAdjacency::build_from_store(manager, device).await?;
         let logic = ArcadiaLogic::build_violation_matrix(&adj.index_to_uri, device)?;
+
+        // 🎯 Initialisation des caches CPU
+        let cpu_edge_src = match adj.edge_src.to_vec1::<u32>() {
+            Ok(v) => v,
+            Err(e) => raise_error!("ERR_GNN_CACHE_SRC", error = e.to_string()),
+        };
+        let cpu_edge_dst = match adj.edge_dst.to_vec1::<u32>() {
+            Ok(v) => v,
+            Err(e) => raise_error!("ERR_GNN_CACHE_DST", error = e.to_string()),
+        };
 
         let varmap = NeuralWeightsMap::new();
         let vb = NeuralWeightsBuilder::from_varmap(&varmap, ComputeType::F32, device);
@@ -51,43 +63,108 @@ impl GnnEngine {
             varmap,
             optimizer,
             adj,
+            cpu_edge_src,
+            cpu_edge_dst,
+            current_epoch: 0,
         })
     }
 
-    /// 🎓 ÉTAPE D'ENTRAÎNEMENT (BACKPROPAGATION)
-    ///
-    /// `adj` n'est plus un paramètre : on utilise `self.adj` initialisé une seule
-    /// fois dans `new()`. Appeler cette méthode N fois (N epochs) ne génère
-    /// plus N lectures de la base de données.
+    /// 🎓 ÉTAPE D'ENTRAÎNEMENT AVEC GRAPH SAMPLING (MINI-BATCH)
     pub async fn train_step(
         &mut self,
         features: &NeuralTensor,
         lambda_logic: f32,
+        batch_size: usize,
     ) -> RaiseResult<f32> {
-        // 1. Forward Pass : Calcul des embeddings [N, D]
+        self.current_epoch += 1;
+        let n_total = self.adj.index_to_uri.len();
+        let actual_batch = batch_size.min(n_total);
+
+        // 1. Échantillonnage déterministe glissant (Sub-graph Seeding)
+        // Couvre le graphe au fil des epochs sans dépendre de générateurs aléatoires complexes
+        let step = (n_total / actual_batch).max(1);
+        let offset = self.current_epoch % step;
+
+        let mut seed_nodes = std::collections::HashSet::new();
+        for i in (offset..n_total).step_by(step).take(actual_batch) {
+            seed_nodes.insert(i);
+        }
+
+        // 2. Extraction du voisinage (1-hop Neighborhood)
+        let mut subgraph_nodes = seed_nodes.clone();
+        let mut subgraph_edges = Vec::new();
+
+        for i in 0..self.cpu_edge_src.len() {
+            let u = self.cpu_edge_src[i] as usize;
+            let v = self.cpu_edge_dst[i] as usize;
+            if seed_nodes.contains(&u) || seed_nodes.contains(&v) {
+                subgraph_nodes.insert(u);
+                subgraph_nodes.insert(v);
+                subgraph_edges.push((u, v));
+            }
+        }
+
+        // 3. Mapping des identifiants (Global -> Local) pour le GNN
+        let mut sorted_nodes: Vec<usize> = subgraph_nodes.into_iter().collect();
+        sorted_nodes.sort(); // Garantit le déterminisme
+
+        let mut old_to_new = std::collections::HashMap::new();
+        let mut sub_uris = Vec::with_capacity(sorted_nodes.len());
+
+        for (new_idx, &old_idx) in sorted_nodes.iter().enumerate() {
+            old_to_new.insert(old_idx, new_idx as u32);
+            sub_uris.push(self.adj.index_to_uri[old_idx].clone());
+        }
+
+        let mut sub_src = Vec::with_capacity(subgraph_edges.len());
+        let mut sub_dst = Vec::with_capacity(subgraph_edges.len());
+        for (u, v) in subgraph_edges {
+            sub_src.push(*old_to_new.get(&u).unwrap());
+            sub_dst.push(*old_to_new.get(&v).unwrap());
+        }
+
+        let device = features.device();
+        let sub_src_tensor = match NeuralTensor::new(sub_src, device) {
+            Ok(t) => t,
+            Err(e) => raise_error!("ERR_GNN_SUB_SRC", error = e.to_string()),
+        };
+        let sub_dst_tensor = match NeuralTensor::new(sub_dst, device) {
+            Ok(t) => t,
+            Err(e) => raise_error!("ERR_GNN_SUB_DST", error = e.to_string()),
+        };
+
+        // 4. Découpage du tenseur de Features (Slicing)
+        let node_indices_u32: Vec<u32> = sorted_nodes.iter().map(|&x| x as u32).collect();
+        let indices_tensor = match NeuralTensor::new(node_indices_u32, device) {
+            Ok(t) => t,
+            Err(e) => raise_error!("ERR_GNN_SUB_IDX", error = e.to_string()),
+        };
+        let sub_features = match features.index_select(&indices_tensor, 0) {
+            Ok(t) => t,
+            Err(e) => raise_error!("ERR_GNN_SUB_FEAT", error = e.to_string()),
+        };
+
+        // 5. Forward Pass (Uniquement sur le sous-graphe !)
         let embeddings = self
             .model
-            .forward(&self.adj.edge_src, &self.adj.edge_dst, features)
+            .forward(&sub_src_tensor, &sub_dst_tensor, &sub_features)
             .await?;
 
-        // 2. Calcul de la Perte Sémantique (Lien Positif)
-        // On extrait les vecteurs sources et cibles pour chaque arête [E, D]
-        let h_src = match embeddings.index_select(&self.adj.edge_src, 0) {
+        // 6. Calcul de la Perte Sémantique Locale
+        let h_src = match embeddings.index_select(&sub_src_tensor, 0) {
             Ok(t) => t,
-            Err(e) => raise_error!("ERR_GNN_LOSS_SELECT_SRC", error = e.to_string()),
+            Err(e) => raise_error!("ERR_GNN_LOSS_SRC", error = e.to_string()),
         };
-        let h_dst = match embeddings.index_select(&self.adj.edge_dst, 0) {
+        let h_dst = match embeddings.index_select(&sub_dst_tensor, 0) {
             Ok(t) => t,
-            Err(e) => raise_error!("ERR_GNN_LOSS_SELECT_DST", error = e.to_string()),
+            Err(e) => raise_error!("ERR_GNN_LOSS_DST", error = e.to_string()),
         };
 
-        // Produit scalaire par arête pour mesurer la force du lien prédit [E]
         let edge_scores = match h_src.mul(&h_dst).and_then(|t| t.sum_keepdim(1)) {
             Ok(t) => t,
             Err(e) => raise_error!("ERR_GNN_LOSS_DOT", error = e.to_string()),
         };
 
-        // On veut que la similarité sur les liens existants tende vers 1.0 (MSE Loss simplifiée)
         let l_semantic = match edge_scores
             .ones_like()
             .and_then(|ones| edge_scores.sub(&ones))
@@ -99,24 +176,23 @@ impl GnnEngine {
             Err(e) => raise_error!("ERR_GNN_LOSS_DIFF", error = e.to_string()),
         };
 
-        // 3. Calcul de la Perte Logique (Neuro-Symbolique)
-        // Matrice de prédiction globale [N, N] pour la Logic Loss
+        // 7. Calcul de la Perte Logique (Instanciée dynamiquement sur le sous-graphe Zéro Dette)
+        let sub_logic = ArcadiaLogic::build_violation_matrix(&sub_uris, device)?;
         let predictions = match embeddings.matmul(&embeddings.transpose(0, 1).unwrap()) {
             Ok(p) => p,
-            Err(e) => raise_error!("ERR_GNN_ENGINE_PRED_MATMUL", error = e.to_string()),
+            Err(e) => raise_error!("ERR_GNN_PRED_MATMUL", error = e.to_string()),
         };
+        let l_logic = sub_logic.compute_logic_loss(&predictions, lambda_logic)?;
 
-        let l_logic = self.logic.compute_logic_loss(&predictions, lambda_logic)?;
-
-        // 4. Somme et Backpropagation
+        // 8. Somme et Backpropagation
         let total_loss = match l_semantic.add(&l_logic) {
             Ok(l) => l,
-            Err(e) => raise_error!("ERR_GNN_ENGINE_LOSS_SUM", error = e.to_string()),
+            Err(e) => raise_error!("ERR_GNN_LOSS_SUM", error = e.to_string()),
         };
 
         match self.optimizer.backward_step(&total_loss) {
             Ok(_) => (),
-            Err(e) => raise_error!("ERR_GNN_ENGINE_BACKWARD", error = e.to_string()),
+            Err(e) => raise_error!("ERR_GNN_BACKWARD", error = e.to_string()),
         }
 
         match total_loss.to_scalar::<f32>() {
@@ -215,7 +291,7 @@ mod tests {
         };
 
         // train_step n'a plus besoin d'adj en paramètre
-        let loss = engine.train_step(&features, 10.0).await?;
+        let loss = engine.train_step(&features, 10.0, 256).await?;
         assert!(loss >= 0.0);
 
         Ok(())
@@ -258,7 +334,7 @@ mod tests {
 
         // 5 epochs — aucun rebuild de GraphAdjacency, aucun accès DB supplémentaire
         for epoch in 0..5 {
-            let loss = engine.train_step(&features, 10.0).await?;
+            let loss = engine.train_step(&features, 10.0, 256).await?;
             assert!(loss >= 0.0, "Epoch {} : perte invalide ({})", epoch, loss);
         }
 

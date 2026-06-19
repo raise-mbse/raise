@@ -144,26 +144,45 @@ where
 
     fn fast_non_dominated_sort(&self, population: &mut Population<G>) {
         let n = population.individuals.len();
-        let mut dominates_list: Vec<Vec<usize>> = vec![vec![]; n];
-        let mut dominated_count: Vec<usize> = vec![0; n];
-        let mut fronts: Vec<Vec<usize>> = vec![vec![]];
 
-        for p in 0..n {
-            for q in 0..n {
+        // 1. Préparation des données d'entrée pour la façade RAISE
+        let indices: Vec<usize> = (0..n).collect();
+
+        // On capture une référence immuable locale pour le contexte multi-thread
+        let individuals = &population.individuals;
+
+        // 🎯 FIX ZÉRO DETTE : Utilisation stricte de la façade execute_parallel_map
+        let mapped_results = execute_parallel_map(indices, |p| {
+            let mut d_list = Vec::new();
+            let mut d_count = 0;
+            let fit_p = individuals[p].fitness.as_ref().unwrap();
+
+            // 🎯 FIX CLIPPY 1 : Itération idiomatique plutôt que `0..n`
+            for (q, ind_q) in individuals.iter().enumerate() {
                 if p == q {
                     continue;
                 }
-                let fit_p = population.individuals[p].fitness.as_ref().unwrap();
-                let fit_q = population.individuals[q].fitness.as_ref().unwrap();
+                let fit_q = ind_q.fitness.as_ref().unwrap();
 
                 if fit_p.dominates(fit_q) {
-                    dominates_list[p].push(q);
+                    d_list.push(q);
                 } else if fit_q.dominates(fit_p) {
-                    dominated_count[p] += 1;
+                    d_count += 1;
                 }
             }
+            (d_list, d_count)
+        });
 
-            if dominated_count[p] == 0 {
+        // 2. Décomposition (Unzip) des résultats retournés par les cœurs CPU
+        let (dominates_list, mut dominated_count): (Vec<Vec<usize>>, Vec<usize>) =
+            mapped_results.into_iter().unzip();
+
+        let mut fronts: Vec<Vec<usize>> = vec![vec![]];
+
+        // Étape 2 : Extraction du Front de Pareto optimal (Front 0)
+        // 🎯 FIX CLIPPY 2 : Itération idiomatique sur dominated_count
+        for (p, &count) in dominated_count.iter().enumerate() {
+            if count == 0 {
                 if let Some(fit) = &mut population.individuals[p].fitness {
                     fit.rank = 0;
                 }
@@ -171,6 +190,7 @@ where
             }
         }
 
+        // Étape 3 : Construction itérative des fronts secondaires
         let mut i = 0;
         while i < fronts.len() {
             let mut next_front: Vec<usize> = Vec::new();

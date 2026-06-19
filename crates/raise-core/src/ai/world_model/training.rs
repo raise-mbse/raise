@@ -39,32 +39,30 @@ impl<'a> WorldTrainer<'a> {
         Ok(Self { engine, opt })
     }
 
-    /// Exécute une étape d'apprentissage par renforcement (Backpropagation).
-    /// * `state_t_tensor` : L'état initial fusionné [1, 32] (Structure + NLP)
-    /// * `action_tensor` : L'action encodée en One-Hot [1, Action_Dim]
-    /// * `target_t1_tensor` : L'état futur réel fusionné [1, 32] (Structure + NLP)
+    /// Exécute une étape d'apprentissage par renforcement (Backpropagation) sur un BATCH.
+    /// * `state_t_tensor` : États initiaux [B, 32]
+    /// * `action_tensor` : Actions encodées [B, Action_Dim]
+    /// * `target_t1_tensor` : États futurs réels [B, 32]
     pub fn train_step(
         &mut self,
         state_t_tensor: &NeuralTensor,
         action_tensor: &NeuralTensor,
         target_t1_tensor: &NeuralTensor,
     ) -> RaiseResult<f64> {
-        // 1. Quantization de l'état initial (Discrétisation façon VQ-VAE)
+        // 🎯 FIX : Le pipeline est déjà agnostique à la taille de batch [B, D] grâce à Candle !
+        // La seule chose à garantir est que le SQRLoss (Mean Squared Error) calcule bien la moyenne sur [B] et [D].
+
         let token_t = self.engine.quantizer.tokenize(state_t_tensor)?;
         let state_quantized = self.engine.quantizer.decode(&token_t)?;
 
-        // 2. Inférence (Prédiction de l'état futur)
         let predicted_tensor = self
             .engine
             .predictor
             .forward(&state_quantized, action_tensor)?;
 
-        // 3. Préparation de la cible réelle (Target)
-        // On passe la cible réelle dans le quantizer pour obtenir sa représentation latente exacte
         let token_t1 = self.engine.quantizer.tokenize(target_t1_tensor)?;
         let target_latent = self.engine.quantizer.decode(&token_t1)?.detach();
 
-        // 4. Calcul de la Perte (MSE Loss)
         let diff = match predicted_tensor.sub(&target_latent) {
             Ok(d) => d,
             Err(e) => raise_error!(
@@ -77,6 +75,7 @@ impl<'a> WorldTrainer<'a> {
             ),
         };
 
+        // La perte MSE moyenne sur tout le Batch
         let loss = match diff.sqr() {
             Ok(s) => match s.mean_all() {
                 Ok(m) => m,
@@ -85,13 +84,11 @@ impl<'a> WorldTrainer<'a> {
             Err(e) => raise_error!("ERR_AI_LOSS_SQR_FAILED", error = e),
         };
 
-        // 5. Rétropropagation (Backprop)
         match self.opt.backward_step(&loss) {
             Ok(_) => (),
             Err(e) => raise_error!("ERR_AI_BACKPROP_FAILED", error = e),
         };
 
-        // 6. Extraction de la valeur scalaire
         let scalar_loss = match loss.to_scalar::<f32>() {
             Ok(val) => val as f64,
             Err(e) => raise_error!("ERR_AI_LOSS_SCALAR_CONVERSION_FAILED", error = e),
@@ -127,18 +124,16 @@ mod tests {
         let mut trainer = WorldTrainer::new(&engine, 0.05).unwrap();
 
         // 2. Création de tenseurs factices (Mock) pour simuler la sortie de l'HybridEncoder
-        // Plus besoin de dépendre de `ArcadiaElement` !
-        let state_t = NeuralTensor::randn(0.0f32, 1.0f32, (1, 32), &device).unwrap();
-        let state_t1 = NeuralTensor::randn(0.0f32, 1.0f32, (1, 32), &device).unwrap();
+        let batch_size = 8;
+        let state_t = NeuralTensor::randn(0.0f32, 1.0f32, (batch_size, 32), &device).unwrap();
+        let state_t1 = NeuralTensor::randn(0.0f32, 1.0f32, (batch_size, 32), &device).unwrap();
 
-        // Mock de l'action (One-hot pour l'index 0)
-        // 🎯 FIX : Forcer le type f32 pour correspondre aux tenseurs d'état
-        let action_tensor = NeuralTensor::from_vec(
-            vec![1.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32],
-            (1, 5),
-            &device,
-        )
-        .unwrap();
+        // One-hot pour l'index 0, dupliqué 8 fois
+        let mut action_vec = Vec::with_capacity(batch_size * 5);
+        for _ in 0..batch_size {
+            action_vec.extend_from_slice(&[1.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32]);
+        }
+        let action_tensor = NeuralTensor::from_vec(action_vec, (batch_size, 5), &device).unwrap();
 
         // 3. Boucle d'entraînement
         let mut initial_loss = 0.0;

@@ -47,9 +47,13 @@ impl SystemModelProvider for ProjectModel {
                     .get("complexity")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(10.0) as f32;
-
+                let handle = f
+                    .properties
+                    .get("handle")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&f.id);
                 ModelFunction {
-                    id: f.id.clone(),
+                    id: handle.to_string(),
                     name: f.name.as_str().to_string(),
                     complexity,
                 }
@@ -67,9 +71,13 @@ impl SystemModelProvider for ProjectModel {
                     .get("capacity")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(100.0) as f32;
-
+                let handle = c
+                    .properties
+                    .get("handle")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&c.id);
                 ModelComponent {
-                    id: c.id.clone(),
+                    id: handle.to_string(),
                     name: c.name.as_str().to_string(),
                     capacity_limit: capacity,
                 }
@@ -84,13 +92,15 @@ impl SystemModelProvider for ProjectModel {
             .map(|e| {
                 let source_id = e
                     .properties
-                    .get("source")
+                    .get("source_handle")
+                    .or_else(|| e.properties.get("source"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
                 let target_id = e
                     .properties
-                    .get("target")
+                    .get("target_handle")
+                    .or_else(|| e.properties.get("target"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
@@ -227,21 +237,27 @@ mod tests {
         let mut model = ProjectModel::default();
 
         let mut f1 = make_element("F1", "Navigation", "LogicalFunction");
+        f1.properties.insert("handle".into(), json_value!("fn_nav")); // 🎯 Ajout test
         f1.properties.insert("complexity".into(), json_value!(20.0));
-        // 🎯 FIX : Utilisation de add_element
         model.add_element("la", "functions", f1);
 
         let mut f2 = make_element("F2", "Radio", "LogicalFunction");
+        f2.properties
+            .insert("handle".into(), json_value!("fn_radio")); // 🎯 Ajout test
         f2.properties.insert("complexity".into(), json_value!(10.0));
         model.add_element("la", "functions", f2);
 
         let mut c1 = make_element("C1", "MainCPU", "PhysicalComponent");
+        c1.properties
+            .insert("handle".into(), json_value!("comp_cpu")); // 🎯 Ajout test
         c1.properties.insert("capacity".into(), json_value!(100.0));
         model.add_element("pa", "components", c1);
 
         let mut ex = make_element("E1", "DataLink", "FunctionalExchange");
-        ex.properties.insert("source".into(), json_value!("F1"));
-        ex.properties.insert("target".into(), json_value!("F2"));
+        ex.properties
+            .insert("source_handle".into(), json_value!("fn_nav")); // 🎯 Utilisation handle
+        ex.properties
+            .insert("target_handle".into(), json_value!("fn_radio"));
         ex.properties.insert("volume".into(), json_value!(50.0));
         model.add_element("la", "exchanges", ex);
 
@@ -266,6 +282,9 @@ mod tests {
         let raw_genes = vec![0, 0];
         let sol = adapter.convert_solution(vec![1.0], 0.0, &raw_genes);
 
-        assert_eq!(sol.allocation[0], ("F1".to_string(), "C1".to_string()));
+        assert_eq!(
+            sol.allocation[0],
+            ("fn_nav".to_string(), "comp_cpu".to_string())
+        );
     }
 }

@@ -127,8 +127,11 @@ impl SoftwareGraphBuilder {
         // ==========================================
         let mut feature_tensors = Vec::with_capacity(n);
 
+        // 🎯 FIX ZERO-COPY : Vecteur neutre pré-alloué.
+        // Évite l'allocation coûteuse de vec![0.0f32; 384] pour chaque nœud sans NLP.
+        let default_nlp_vec = vec![0.0f32; 384];
+
         for doc in &documents {
-            // Mapping à la volée vers l'ontologie Arcadia pour notre HybridEncoder
             let kind = match doc.get("element_type").and_then(|v| v.as_str()) {
                 Some(t) if t.eq_ignore_ascii_case("function") => {
                     "https://raise.io/ontology/arcadia/pa#PhysicalFunction"
@@ -138,7 +141,8 @@ impl SoftwareGraphBuilder {
 
             let element = ArcadiaElement {
                 id: doc
-                    .get("_id")
+                    .get("handle")
+                    .or_else(|| doc.get("_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string(),
@@ -147,13 +151,20 @@ impl SoftwareGraphBuilder {
                 properties: UnorderedMap::new(),
             };
 
-            // Récupération de l'embedding NLP (S'il est absent, on retourne un vecteur zéro)
-            let nlp_vec: Vec<f32> = doc
-                .get("nlp_embedding")
-                .and_then(|v| crate::utils::data::json::deserialize_from_value(v.clone()).ok())
-                .unwrap_or_else(|| vec![0.0f32; 384]);
+            // 🎯 FIX ZERO-COPY : Utilisation de CowData
+            // Permet de passer un pointeur (&default_nlp_vec) sans allouer de mémoire,
+            // OU de prendre possession (Owned) du vecteur s'il est bien trouvé dans le JSON.
+            let nlp_vec: CowData<[f32]> = match doc.get("nlp_embedding") {
+                Some(v) => {
+                    match crate::utils::data::json::deserialize_from_value::<Vec<f32>>(v.clone()) {
+                        Ok(vec) => CowData::Owned(vec),
+                        Err(_) => CowData::Borrowed(default_nlp_vec.as_slice()),
+                    }
+                }
+                None => CowData::Borrowed(default_nlp_vec.as_slice()),
+            };
 
-            // Encodage Zéro Dette [1, 32]
+            // Encodage Zéro Dette [1, 32] (On passe la référence contenue dans le Cow)
             let feat_tensor = hybrid_encoder.encode_hybrid(&element, &nlp_vec, device)?;
             feature_tensors.push(feat_tensor);
         }

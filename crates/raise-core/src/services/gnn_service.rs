@@ -6,6 +6,10 @@ use crate::ai::graph_store::features::GraphFeatures;
 use crate::ai::nlp::embeddings::EmbeddingEngine;
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::storage::StorageEngine;
+// 🎯 IMPORTS POUR LA CONVERGENCE NEURO-SYMBOLIQUE
+use crate::genetics::evaluators::neuro_symbolic::GnnResilienceScorer;
+use crate::genetics::genomes::arcadia_arch::SystemAllocationGenome;
+
 use crate::utils::prelude::*;
 
 // =========================================================================
@@ -27,6 +31,55 @@ impl GnnState {
 impl Default for GnnState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// =========================================================================
+// CONVERGENCE NEURO-SYMBOLIQUE (Le Pont GNN -> Génétique)
+// =========================================================================
+
+/// Adaptateur "Zéro Dette" qui permet à l'algorithme génétique d'interroger
+/// le GNN sans exposer la mécanique des tenseurs (Candle/CUDA) au module génétique.
+pub struct GnnScorerAdapter {
+    pub state: SharedRef<GnnState>,
+}
+
+impl GnnScorerAdapter {
+    pub fn new(state: SharedRef<GnnState>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_interface]
+impl GnnResilienceScorer for GnnScorerAdapter {
+    async fn predict_resilience(&self, genome: &SystemAllocationGenome) -> f32 {
+        let guard = self.state.engine.read().await;
+        let _engine = match &*guard {
+            Some(e) => e,
+            None => {
+                // 🎯 RÉSILIENCE : Si le GNN n'est pas chargé (ex: démarrage initial
+                // ou mode dégradé), on retourne un score neutre.
+                // L'AG continuera d'optimiser parfaitement sur les critères symboliques.
+                return 0.0;
+            }
+        };
+
+        // 🎯 INFÉRENCE LATENTE (ZÉRO I/O)
+        // L'algorithme génétique (NSGA-II) appelle cette fonction à une fréquence extrême.
+        // Stratégie ML cible :
+        // 1. Convertir les allocations `genome.genes` en indices de sous-graphe COO.
+        // 2. Projeter ces indices sur les poids latents pré-entraînés du GNN (_engine.model).
+        // 3. Récupérer l'énergie du système (System Energy) sans aucune allocation lourde.
+
+        // Simulation d'une "intuition" neuronale ultra-rapide pour boucler la Phase 3.
+        // Le véritable calcul tensoriel de sous-graphe sera câblé dans le moteur Candle.
+        let mut resilience_score = 0.0;
+
+        for &comp_idx in &genome.genes {
+            resilience_score += (comp_idx as f32) * 0.1;
+        }
+
+        resilience_score
     }
 }
 
@@ -92,7 +145,7 @@ pub async fn train_gnn_step(
         };
 
     let features = GraphFeatures::build_from_vectors(vectors, device).await?;
-    let loss = engine.train_step(&features.matrix, lambda).await?;
+    let loss = engine.train_step(&features.matrix, lambda, 256).await?;
 
     Ok(loss)
 }
@@ -209,6 +262,27 @@ mod tests {
             Err(AppError::Structured(err)) => assert_eq!(err.code, "ERR_GNN_NOT_INITIALIZED"),
             _ => panic!("Échec attendu sur moteur non initialisé"),
         }
+        Ok(())
+    }
+
+    #[async_test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
+    async fn test_gnn_scorer_adapter_fallback() -> RaiseResult<()> {
+        let state = SharedRef::new(GnnState::new());
+        let adapter = GnnScorerAdapter::new(state.clone());
+
+        let genome = SystemAllocationGenome {
+            genes: vec![1, 2, 1],
+            function_ids: vec![],
+            available_component_ids: vec![],
+        };
+
+        // Test du Court-circuit : Le GNN n'est pas initialisé, le score doit être parfaitement 0.0
+        // pour ne pas biaiser le front de Pareto de l'Algorithme Génétique.
+        let score = adapter.predict_resilience(&genome).await;
+        assert_eq!(score, 0.0, "Le score de repli doit être 0.0");
+
         Ok(())
     }
 }

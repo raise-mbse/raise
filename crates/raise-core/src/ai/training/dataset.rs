@@ -1,7 +1,62 @@
 // FICHIER : src-tauri/src/ai/training/dataset.rs
 
 use crate::json_db::collections::manager::CollectionsManager;
+use crate::model_engine::types::ArcadiaElement;
 use crate::utils::prelude::*; // 🎯 Façade Unique
+
+/// Fournit un flux continu de paires (État_t, État_t+1) pour le World Model.
+pub struct ArcadiaBatchIterator<'a> {
+    manager: &'a CollectionsManager<'a>,
+    collections: Vec<String>,
+    current_col_idx: usize,
+    batch_size: usize,
+}
+
+impl<'a> ArcadiaBatchIterator<'a> {
+    pub async fn new(manager: &'a CollectionsManager<'a>, batch_size: usize) -> RaiseResult<Self> {
+        let collections = manager.list_collections().await.unwrap_or_default();
+        Ok(Self {
+            manager,
+            collections,
+            current_col_idx: 0,
+            batch_size,
+        })
+    }
+
+    /// Extrait le prochain batch d'ArcadiaElements directement depuis la DB.
+    pub async fn next_batch(&mut self) -> RaiseResult<Option<Vec<ArcadiaElement>>> {
+        while self.current_col_idx < self.collections.len() {
+            let col_name = &self.collections[self.current_col_idx];
+
+            // Note: En conditions réelles, on utiliserait un curseur de pagination de la DB.
+            // Ici on simule le découpage pour l'exemple.
+            if let Ok(docs) = self.manager.list_all(col_name).await {
+                if !docs.is_empty() {
+                    let mut batch = Vec::with_capacity(self.batch_size);
+                    for doc in docs.into_iter().take(self.batch_size) {
+                        let element = ArcadiaElement {
+                            id: doc
+                                .get("handle")
+                                .or_else(|| doc.get("_id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            name: crate::model_engine::types::NameType::default(),
+                            kind: "https://raise.io/ontology/arcadia/pa#PhysicalComponent"
+                                .to_string(),
+                            properties: UnorderedMap::new(),
+                        };
+                        batch.push(element);
+                    }
+                    self.current_col_idx += 1;
+                    return Ok(Some(batch));
+                }
+            }
+            self.current_col_idx += 1;
+        }
+        Ok(None) // Fin du dataset
+    }
+}
 
 #[derive(Debug, Serializable, Deserializable, Clone, PartialEq)]
 pub struct TrainingExample {

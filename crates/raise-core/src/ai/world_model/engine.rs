@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/ai/world_model/engine.rs
+// FICHIER : crates/raise-core/src/ai/world_model/engine.rs
 
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::utils::prelude::*; // 🎯 Façade Unique RAISE
@@ -31,7 +31,7 @@ pub struct WorldAction {
 
 impl WorldAction {
     /// Convertit une intention sémantique en tenseur "One-Hot" pour le prédicteur.
-    pub fn to_tensor(&self, dim: usize) -> RaiseResult<NeuralTensor> {
+    pub fn to_tensor(&self, dim: usize, device: &ComputeHardware) -> RaiseResult<NeuralTensor> {
         let mut data = vec![0f32; dim];
         let idx = match self.intent {
             CommandType::Create => 0,
@@ -45,8 +45,8 @@ impl WorldAction {
             data[idx] = 1.0;
         }
 
-        // 🎯 Pattern Match strict pour la création tensorielle
-        match NeuralTensor::from_vec(data, (1, dim), &ComputeHardware::Cpu) {
+        // 🎯 FIX : Utilisation du device dynamique au lieu de ComputeHardware::Cpu
+        match NeuralTensor::from_vec(data, (1, dim), device) {
             Ok(t) => Ok(t),
             Err(e) => raise_error!(
                 "ERR_TENSOR_FROM_VEC",
@@ -86,8 +86,14 @@ impl NeuroSymbolicEngine {
 
     /// Initialise le moteur Neuro-Symbolique Arcadia.
     pub fn new(config: WorldModelConfig, varmap: NeuralWeightsMap) -> RaiseResult<Self> {
-        let vb =
-            NeuralWeightsBuilder::from_varmap(&varmap, ComputeType::F32, &ComputeHardware::Cpu);
+        // 🎯 FIX : Détection du matériel (GPU si configuré et disponible, sinon CPU optimisé)
+        let device = if config.use_gpu {
+            AppConfig::device() // Va chercher Cuda/Metal si disponible dans ton infrastructure
+        } else {
+            &ComputeHardware::Cpu
+        };
+
+        let vb = NeuralWeightsBuilder::from_varmap(&varmap, ComputeType::F32, device);
 
         let quantizer = match VectorQuantizer::new(&config, vb.pp("quantizer")) {
             Ok(q) => q,
@@ -121,7 +127,10 @@ impl NeuroSymbolicEngine {
         let raw_perception = ArcadiaEncoder::encode_element(element)?;
         let token = self.quantizer.tokenize(&raw_perception)?;
         let state_quantized = self.quantizer.decode(&token)?;
-        let action_tensor = action.to_tensor(self.config.action_dim)?;
+
+        // 🎯 FIX : On passe le device du tenseur d'état pour rester dans le même espace mémoire
+        let device = state_quantized.device();
+        let action_tensor = action.to_tensor(self.config.action_dim, device)?;
 
         match self.predictor.forward(&state_quantized, &action_tensor) {
             Ok(future) => Ok(future),
@@ -199,7 +208,12 @@ impl NeuroSymbolicEngine {
 
         let buffer = fs::read_async(path).await?;
 
-        let tensors = match SafeTensorsIO::load_buffer(&buffer, &ComputeHardware::Cpu) {
+        let device = if config.use_gpu {
+            AppConfig::device()
+        } else {
+            &ComputeHardware::Cpu
+        };
+        let tensors = match SafeTensorsIO::load_buffer(&buffer, device) {
             Ok(t) => t,
             Err(e) => raise_error!(
                 "ERR_MODEL_LOAD_BUFFER",

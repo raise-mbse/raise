@@ -1,5 +1,5 @@
 // FICHIER : src-tauri/src/ai/graph_store/logic.rs
-
+use crate::ai::protocols::ontology::OntologyRuleEngine;
 use crate::utils::prelude::*;
 
 pub struct ArcadiaLogic {
@@ -39,10 +39,10 @@ impl ArcadiaLogic {
         let mut dst_violations: Vec<u32> = Vec::new();
 
         // Scan sparse : on ne visite que les paires (type_src, type_dst) interdites.
-        // Pour chaque règle de violation, on indexe directement les nœuds concernés.
         for i in 0..n {
             for j in 0..n {
-                if Self::is_arcadia_violation(types[i], types[j]) {
+                // 🎯 FIX ZÉRO DETTE : Délégation de la validation à l'OntologyRuleEngine
+                if OntologyRuleEngine::is_violation(types[i], types[j]) {
                     src_violations.push(i as u32);
                     dst_violations.push(j as u32);
                 }
@@ -187,16 +187,6 @@ impl ArcadiaLogic {
 
     fn extract_type(uri: &str) -> &str {
         uri.split(':').next().unwrap_or("unknown")
-    }
-
-    fn is_arcadia_violation(src: &str, dst: &str) -> bool {
-        matches!(
-            (src, dst),
-            // Règles de violation (Cycle en V inversé)
-            ("pa", "oa") | ("la", "pa") | ("sa", "oa") | ("sa", "pa") //                                              ^^^^^^^^^^
-                                                                      //                                              Règle manquante ajoutée :
-                                                                      //                                              System → Physical sans Logical intermédiaire
-        )
     }
 }
 
