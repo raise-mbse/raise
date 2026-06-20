@@ -1,7 +1,8 @@
-// FICHIER : src-tauri/src/blockchain/bridge/mod.rs
+// FICHIER : crates/raise-core/src/blockchain/bridge/mod.rs
 
-use crate::blockchain::storage::commit::MentisCommit;
+use crate::blockchain::storage::commit::{MentisCommit, MutationOp};
 use crate::json_db::storage::StorageEngine;
+use crate::services::devops_service::{self, DevopsExecutionContext};
 use crate::utils::prelude::*; // 🎯 Façade Unique RAISE
 use crate::AppState;
 
@@ -14,18 +15,21 @@ pub use model_sync::ModelSync;
 /// Structure principale coordonnant la réconciliation entre la Blockchain et les moteurs RAISE.
 /// Assure l'intégrité entre le registre distribué et le graphe de connaissance local.
 pub struct ArcadiaBridge<'a> {
+    shared_storage: SharedRef<StorageEngine>,
     db_adapter: DbAdapter<'a>,
     model_sync: ModelSync<'a>,
 }
 
 impl<'a> ArcadiaBridge<'a> {
     /// Initialise le pont en résolvant les domaines techniques via les Mount Points système.
-    pub fn new(storage: &'a StorageEngine, app_state: &'a AppState) -> Self {
+    /// L'utilisation de &'a SharedRef garantit la cohérence du cycle de vie avec service.rs
+    pub fn new(storage_ref: &'a SharedRef<StorageEngine>, app_state: &'a AppState) -> Self {
         let config = AppConfig::get();
         // 🎯 RÉSOLUTION VIA MOUNT POINTS : Utilisation des domaines système configurés
         Self {
+            shared_storage: storage_ref.clone(),
             db_adapter: DbAdapter::new(
-                storage,
+                storage_ref.as_ref(),
                 &config.mount_points.system.domain,
                 &config.mount_points.system.db,
             ),
@@ -39,7 +43,6 @@ impl<'a> ArcadiaBridge<'a> {
         self.db_adapter.apply_commit(commit).await?;
 
         // 2. Synchronisation logique dans le ProjectModel (Mémoire)
-        // 🎯 FIX MACRO : On respecte la signature ($key, $context)
         if let Err(e) = self.model_sync.sync_commit(commit).await {
             user_error!(
                 "ERR_BRIDGE_RAM_SYNC_FAILED",
@@ -49,6 +52,64 @@ impl<'a> ArcadiaBridge<'a> {
                     "hint": "La DB est à jour, mais la mémoire est désynchronisée. Un rechargement de l'UI peut être nécessaire."
                 })
             );
+        }
+
+        // =========================================================================
+        // 3. 🚀 DÉCLENCHEMENT DE L'AGENT DEVOPS (Auto-Remédiation Edge)
+        // =========================================================================
+        for mutation in &commit.mutations {
+            if mutation.operation == MutationOp::Delete {
+                continue;
+            }
+
+            let payload = &mutation.payload;
+            let types = payload["@type"].as_array();
+            let is_binary =
+                types.is_some_and(|t| t.iter().any(|v| v.as_str() == Some("raise:BinaryElement")));
+
+            if is_binary {
+                let arch = payload["target_architecture"].as_str().unwrap_or("");
+
+                // Extraction du handle cible ou fallback sur l'ID de la mutation
+                let target_handle = payload
+                    .get("execution_context")
+                    .and_then(|ctx| ctx.get("target_handle").or_else(|| ctx.get("deploy_path")))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&mutation.element_id);
+
+                crate::user_info!(
+                    "BRIDGE_TRIGGER_DEVOPS",
+                    json_value!({"artifact": target_handle, "arch": arch})
+                );
+
+                let config = AppConfig::get();
+                let devops_ctx = DevopsExecutionContext {
+                    domain: &config.mount_points.system.domain,
+                    db: &config.mount_points.system.db,
+                    storage: self.shared_storage.clone(),
+                    native_llm: None,
+                    session_id: &format!("p2p_sync_{}", commit.id),
+                    is_test_mode: false,
+                };
+
+                // Délégation stricte au service métier
+                match devops_service::deploy_edge_artifact(
+                    target_handle,
+                    arch,
+                    &mutation.element_id,
+                    devops_ctx,
+                )
+                .await
+                {
+                    Ok(msg) => {
+                        crate::user_success!("BRIDGE_DEVOPS_SUCCESS", json_value!({"msg": msg}))
+                    }
+                    Err(e) => crate::user_error!(
+                        "BRIDGE_DEVOPS_FAILED",
+                        json_value!({"error": e.to_string(), "artifact": target_handle})
+                    ),
+                }
+            }
         }
 
         Ok(())
@@ -65,17 +126,19 @@ mod tests {
     use crate::blockchain::storage::commit::{MentisCommit, Mutation, MutationOp};
     use crate::json_db::collections::manager::CollectionsManager;
     use crate::model_engine::types::{ArcadiaElement, ProjectModel};
-    use crate::utils::testing::DbSandbox;
+
+    // 🎯 FIX: Import de l'AgentDbSandbox pour l'alignement strict des types de pointeurs
+    use crate::utils::testing::{AgentDbSandbox, DbSandbox};
 
     /// Test existant : Cycle complet Blockchain -> DB -> Mémoire
     #[async_test]
     async fn test_bridge_full_cycle_logic() -> RaiseResult<()> {
-        let sandbox = DbSandbox::new().await?;
+        // 🎯 FIX: Utilisation de AgentDbSandbox qui expose un SharedRef<StorageEngine> (sandbox.db)
+        let sandbox = AgentDbSandbox::new().await?;
         let config = AppConfig::get();
 
-        // 🎯 FIX MOUNT POINTS : Utilisation du domaine système configuré
         let sys_mgr = CollectionsManager::new(
-            &sandbox.storage,
+            &sandbox.db, // 🎯 Utilisation du SharedRef
             &config.mount_points.system.domain,
             &config.mount_points.system.db,
         );
@@ -95,9 +158,9 @@ mod tests {
             model: SharedRef::new(AsyncMutex::new(ProjectModel::default())),
         };
 
-        let bridge = ArcadiaBridge::new(&sandbox.storage, &app_state);
+        // 🎯 FIX: Transmission du bon type de pointeur partagé
+        let bridge = ArcadiaBridge::new(&sandbox.db, &app_state);
 
-        // 🎯 FIX PAYLOAD : On utilise la même technique robuste que dans model_sync.rs
         let default_element = ArcadiaElement::default();
         let mut payload =
             json::serialize_to_value(&default_element).expect("Sérialisation échouée");
@@ -147,16 +210,16 @@ mod tests {
         Ok(())
     }
 
-    /// 🎯 NOUVEAU TEST : Résilience face à un domaine système invalide (Mount Point Error)
+    /// Résilience face à un domaine système invalide (Mount Point Error)
     #[async_test]
     async fn test_bridge_resilience_on_invalid_mount_point() -> RaiseResult<()> {
-        let sandbox = DbSandbox::new().await?;
+        let sandbox = AgentDbSandbox::new().await?; // 🎯 FIX
         let app_state = AppState {
             model: SharedRef::new(AsyncMutex::new(ProjectModel::default())),
         };
 
-        // Simulation d'une configuration corrompue (Domaine inexistant)
-        let bridge = ArcadiaBridge::new(&sandbox.storage, &app_state);
+        // Simulation d'une configuration corrompue
+        let bridge = ArcadiaBridge::new(&sandbox.db, &app_state); // 🎯 FIX
 
         let commit = MentisCommit {
             id: "tx_fail".into(),
@@ -177,12 +240,12 @@ mod tests {
 
     #[async_test]
     async fn test_bridge_is_ready() -> RaiseResult<()> {
-        let sandbox = DbSandbox::new().await?;
+        let sandbox = AgentDbSandbox::new().await?; // 🎯 FIX
         let app_state = AppState {
             model: SharedRef::new(AsyncMutex::new(ProjectModel::default())),
         };
 
-        let bridge = ArcadiaBridge::new(&sandbox.storage, &app_state);
+        let bridge = ArcadiaBridge::new(&sandbox.db, &app_state); // 🎯 FIX
         assert!(bridge.model_sync.is_ready());
         Ok(())
     }

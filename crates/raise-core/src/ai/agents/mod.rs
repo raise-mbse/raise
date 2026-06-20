@@ -1,6 +1,7 @@
 // FICHIER : src-tauri/src/ai/agents/mod.rs
 
 pub mod context;
+pub mod devops_agent;
 pub mod dynamic_agent;
 pub mod intent_classifier;
 pub mod prompt_engine;

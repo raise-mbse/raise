@@ -59,6 +59,20 @@ pub enum EngineeringIntent {
         /// Le chemin ou le nom du fichier (ex: "directive_2026_288.xml")
         path: String,
     },
+
+    // 🎯 INJECTION : Intentions d'infrastructure SRE
+    #[serde(rename = "deploy_edge_artifact")]
+    DeployEdgeArtifact {
+        target_handle: String,
+        target_architecture: String,
+        payload_uri: String,
+    },
+
+    #[serde(rename = "rollback_deployment")]
+    RollbackDeployment {
+        target_handle: String,
+        fallback_commit: String,
+    },
 }
 
 fn default_scope() -> String {
@@ -86,6 +100,9 @@ impl EngineeringIntent {
             Self::GenerateCode { .. } => "ref:agents:handle:agent_software",
             Self::MutateCode { .. } => "ref:agents:handle:agent_software",
             Self::IngestNormativeReference { .. } => "ref:agents:handle:agent_software",
+            Self::DeployEdgeArtifact { .. } | Self::RollbackDeployment { .. } => {
+                "ref:agents:handle:agent_devops"
+            }
         }
     }
 

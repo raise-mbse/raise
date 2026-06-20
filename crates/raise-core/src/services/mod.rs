@@ -2,6 +2,7 @@ pub mod ai_service;
 pub mod blockchain_service;
 pub mod codegen_service;
 pub mod cognitive_service;
+pub mod devops_service;
 pub mod dl_service;
 pub mod genetics_service;
 pub mod gnn_service;

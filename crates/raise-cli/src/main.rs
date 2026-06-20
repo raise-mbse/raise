@@ -104,6 +104,7 @@ enum Commands {
     Traceability(commands::traceability::TraceabilityArgs),
     Spatial(commands::spatial::SpatialArgs),
     CodeGen(commands::code_gen::CodeGenArgs),
+    Devops(commands::devops::DevopsArgs), // 🎯 FIX : Ajout de commands::
     Validator(commands::validator::ValidatorArgs),
     Utils(commands::utils::UtilsArgs),
 }
@@ -244,7 +245,6 @@ fn main() -> RaiseResult<()> {
         }
 
         // 🧠 INITIALISATION DE L'ORCHESTRATEUR IA
-        // On utilise le manager système pour résoudre les configurations des moteurs
         let kernel_state = match raise_core::kernel::state::RaiseKernelState::boot(storage.clone())
             .await
         {
@@ -472,6 +472,7 @@ async fn execute_command(cmd: Commands, ctx: CliContext) -> RaiseResult<()> {
         Commands::Traceability(args) => commands::traceability::handle(args, ctx).await,
         Commands::Spatial(args) => commands::spatial::handle(args, ctx).await,
         Commands::CodeGen(args) => commands::code_gen::handle(args, ctx).await,
+        Commands::Devops(args) => commands::devops::handle(args, ctx).await, // 🎯 FIX : Ajout de commands::
         Commands::Validator(args) => commands::validator::handle(args, ctx).await,
         Commands::Utils(args) => commands::utils::handle(args, ctx).await,
     }
