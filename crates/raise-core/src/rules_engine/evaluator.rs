@@ -2,10 +2,6 @@
 use crate::rules_engine::ast::Expr;
 use crate::utils::prelude::*;
 
-// 🎯 MIGRATION V1.3 :
-// L'énumération `EvalError` et son `impl From` ont été TOTALEMENT SUPPRIMÉS.
-// Tout le fichier utilise dorénavant nativement `RaiseResult` et les macros du socle.
-
 /// Trait permettant aux règles d'accéder à des données externes (Lookups)
 #[async_interface]
 pub trait DataProvider: Send + Sync {
@@ -23,8 +19,388 @@ impl DataProvider for NoOpDataProvider {
 pub struct Evaluator;
 
 impl Evaluator {
-    // 🎯 MIGRATION : Remplacement du Result standard par RaiseResult
+    // ========================================================================
+    // 1. LE ROUTEUR HYBRIDE (DUAL-ENGINE)
+    // ========================================================================
+
+    /// Point d'entrée principal. Détecte la présence d'I/O et route l'exécution
+    /// vers le moteur Synchrone (Haute Performance) ou Asynchrone.
     pub async fn evaluate<'a>(
+        expr: &'a Expr,
+        context: &'a JsonValue,
+        provider: &dyn DataProvider,
+    ) -> RaiseResult<CowData<'a, JsonValue>> {
+        if !Self::requires_async(expr) {
+            // 🚀 VOIE RAPIDE : 100% CPU, 0 allocation de Future sur le tas
+            Self::evaluate_sync(expr, context)
+        } else {
+            // 🐌 VOIE LENTE : Résolution asynchrone requise pour la DB
+            Box::pin(Self::evaluate_async(expr, context, provider)).await
+        }
+    }
+
+    /// Détecte récursivement (et très rapidement) si un accès I/O est caché dans l'AST
+    fn requires_async(expr: &Expr) -> bool {
+        match expr {
+            Expr::Lookup { .. } => true,
+            Expr::Val(_) | Expr::Var(_) | Expr::Now | Expr::IsA(_) => false,
+            Expr::And(list)
+            | Expr::Or(list)
+            | Expr::Eq(list)
+            | Expr::Neq(list)
+            | Expr::Add(list)
+            | Expr::Sub(list)
+            | Expr::Mul(list)
+            | Expr::Div(list)
+            | Expr::Concat(list) => list.iter().any(Self::requires_async),
+            Expr::Not(e)
+            | Expr::Abs(e)
+            | Expr::Len(e)
+            | Expr::Min(e)
+            | Expr::Max(e)
+            | Expr::Trim(e)
+            | Expr::Lower(e)
+            | Expr::Upper(e) => Self::requires_async(e),
+            Expr::Gt(a, b)
+            | Expr::Lt(a, b)
+            | Expr::Gte(a, b)
+            | Expr::Lte(a, b)
+            | Expr::Contains { list: a, value: b }
+            | Expr::RegexMatch {
+                value: a,
+                pattern: b,
+            }
+            | Expr::DateDiff { start: a, end: b }
+            | Expr::DateAdd { date: a, days: b }
+            | Expr::Round {
+                value: a,
+                precision: b,
+            } => Self::requires_async(a) || Self::requires_async(b),
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                Self::requires_async(condition)
+                    || Self::requires_async(then_branch)
+                    || Self::requires_async(else_branch)
+            }
+            Expr::Replace {
+                value,
+                pattern,
+                replacement,
+            } => {
+                Self::requires_async(value)
+                    || Self::requires_async(pattern)
+                    || Self::requires_async(replacement)
+            }
+            Expr::Map {
+                list,
+                expr: map_expr,
+                ..
+            } => Self::requires_async(list) || Self::requires_async(map_expr),
+            Expr::Filter {
+                list, condition, ..
+            } => Self::requires_async(list) || Self::requires_async(condition),
+        }
+    }
+
+    // ========================================================================
+    // 2. LE MOTEUR SYNCHRONE (VOIE RAPIDE - 0 GC PRESSURE)
+    // ========================================================================
+
+    pub fn evaluate_sync<'a>(
+        expr: &'a Expr,
+        context: &'a JsonValue,
+    ) -> RaiseResult<CowData<'a, JsonValue>> {
+        match expr {
+            Expr::Val(v) => Ok(CowData::Borrowed(v)),
+            Expr::Var(path) => resolve_path(context, path),
+
+            Expr::And(list) => {
+                for e in list {
+                    let val = Self::evaluate_sync(e, context)?;
+                    if !is_truthy(&val) {
+                        return Ok(CowData::Owned(JsonValue::Bool(false)));
+                    }
+                }
+                Ok(CowData::Owned(JsonValue::Bool(true)))
+            }
+            Expr::Or(list) => {
+                for e in list {
+                    let val = Self::evaluate_sync(e, context)?;
+                    if is_truthy(&val) {
+                        return Ok(CowData::Owned(JsonValue::Bool(true)));
+                    }
+                }
+                Ok(CowData::Owned(JsonValue::Bool(false)))
+            }
+            Expr::Not(e) => {
+                let res = Self::evaluate_sync(e, context)?;
+                Ok(CowData::Owned(JsonValue::Bool(!is_truthy(&res))))
+            }
+
+            Expr::Eq(args) => {
+                if args.len() < 2 { return Ok(CowData::Owned(JsonValue::Bool(true))); }
+                let first = Self::evaluate_sync(&args[0], context)?;
+                for arg in &args[1..] {
+                    let next = Self::evaluate_sync(arg, context)?;
+                    if first != next { return Ok(CowData::Owned(JsonValue::Bool(false))); }
+                }
+                Ok(CowData::Owned(JsonValue::Bool(true)))
+            }
+            Expr::Neq(args) => {
+                if args.len() < 2 { return Ok(CowData::Owned(JsonValue::Bool(false))); }
+                let a = Self::evaluate_sync(&args[0], context)?;
+                let b = Self::evaluate_sync(&args[1], context)?;
+                Ok(CowData::Owned(JsonValue::Bool(a != b)))
+            }
+            Expr::Gt(a, b) => compare_nums_sync(a, b, context, |x, y| x > y),
+            Expr::Lt(a, b) => compare_nums_sync(a, b, context, |x, y| x < y),
+            Expr::Gte(a, b) => compare_nums_sync(a, b, context, |x, y| x >= y),
+            Expr::Lte(a, b) => compare_nums_sync(a, b, context, |x, y| x <= y),
+
+            Expr::Add(list) => fold_nums_sync(list, context, 0.0, |acc, x| acc + x),
+            Expr::Mul(list) => fold_nums_sync(list, context, 1.0, |acc, x| acc * x),
+            Expr::Sub(list) => {
+                if list.is_empty() { return Ok(CowData::Owned(json_value!(0))); }
+                let first_val = Self::evaluate_sync(&list[0], context)?;
+                let mut acc: f64 = match first_val.as_f64() {
+                    Some(num) => num,
+                    None => raise_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"operation": "aggregation_init", "expected": "number", "received": first_val, "item_index": 0})),
+                };
+                for (index, e) in list[1..].iter().enumerate() {
+                    let current_val = Self::evaluate_sync(e, context)?;
+                    let val: f64 = match current_val.as_f64() {
+                        Some(num) => num,
+                        None => raise_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"operation": "subtraction_loop", "expected": "number", "received": current_val, "item_index": index + 1})),
+                    };
+                    acc -= val;
+                }
+                Ok(CowData::Owned(smart_number(acc)))
+            }
+            Expr::Div(list) => {
+                if list.len() < 2 { raise_error!("ERR_RULE_INVALID_ARGS", error = "L'opérateur Div requiert au moins 2 arguments"); }
+                let first_val = Self::evaluate_sync(&list[0], context)?;
+                let mut acc: f64 = match first_val.as_f64() {
+                    Some(n) => n,
+                    None => raise_error!("ERR_RULE_TYPE_MISMATCH", error = "Le numérateur initial doit être un nombre"),
+                };
+                for e in list[1..].iter() {
+                    let current_val = Self::evaluate_sync(e, context)?;
+                    let val: f64 = match current_val.as_f64() {
+                        Some(n) => n,
+                        None => raise_error!("ERR_RULE_TYPE_MISMATCH", error = "Les dénominateurs doivent être des nombres"),
+                    };
+                    if val == 0.0 { raise_error!("ERR_RULE_DIV_BY_ZERO", error = "Division par zéro interdite"); }
+                    acc /= val;
+                }
+                Ok(CowData::Owned(smart_number(acc)))
+            }
+            Expr::Abs(e) => {
+                let val = Self::evaluate_sync(e, context)?;
+                let v: f64 = match val.as_f64() {
+                    Some(num) => num,
+                    None => raise_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"operation": "ABS", "expected": "number", "received": val})),
+                };
+                Ok(CowData::Owned(smart_number(v.abs())))
+            }
+            Expr::Round { value, precision } => {
+                let val_res = Self::evaluate_sync(value, context)?;
+                let v: f64 = match val_res.as_f64() {
+                    Some(n) => n,
+                    None => raise_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"operation": "ROUND", "field": "value", "expected": "number", "received": val_res})),
+                };
+                let prec_res = Self::evaluate_sync(precision, context)?;
+                let p: i32 = prec_res.as_i64().unwrap_or(0) as i32;
+                let factor = 10f64.powi(p);
+                Ok(CowData::Owned(smart_number((v * factor).round() / factor)))
+            }
+
+            Expr::Min(e) => {
+                let val = Self::evaluate_sync(e, context)?;
+                let arr: &Vec<JsonValue> = match val.as_array() {
+                    Some(array) => array,
+                    None => raise_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"operation": "MIN", "expected": "array", "received": val})),
+                };
+                let min = arr.iter().filter_map(|v| v.as_f64()).fold(f64::INFINITY, |a, b| a.min(b));
+                if min.is_infinite() { Ok(CowData::Owned(JsonValue::Null)) } else { Ok(CowData::Owned(smart_number(min))) }
+            }
+            Expr::Max(e) => {
+                let val = Self::evaluate_sync(e, context)?;
+                let arr: &Vec<JsonValue> = match val.as_array() {
+                    Some(array) => array,
+                    None => raise_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"operation": "MAX", "expected": "array", "received": val})),
+                };
+                let max = arr.iter().filter_map(|v| v.as_f64()).fold(f64::NEG_INFINITY, |a, b| a.max(b));
+                if max.is_infinite() { Ok(CowData::Owned(JsonValue::Null)) } else { Ok(CowData::Owned(smart_number(max))) }
+            }
+
+            Expr::Contains { list, value } => {
+                let list_val = Self::evaluate_sync(list, context)?;
+                let search_val = Self::evaluate_sync(value, context)?;
+                let found = match list_val.as_array() {
+                    Some(arr) => arr.contains(&*search_val),
+                    None => match list_val.as_str() {
+                        Some(s) => {
+                            let search_str = search_val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                            s.contains(search_str)
+                        }
+                        None => raise_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({ "operation": "CONTAINS" })),
+                    },
+                };
+                Ok(CowData::Owned(JsonValue::Bool(found)))
+            }
+
+            Expr::Map { list, alias, expr: map_expr } => {
+                let list_val = Self::evaluate_sync(list, context)?;
+                let arr: &Vec<JsonValue> = list_val.as_array().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"expected": "array"})))?;
+                let mut result_arr = Vec::new();
+                for item in arr {
+                    let mut local_ctx = context.clone();
+                    if let Some(obj) = local_ctx.as_object_mut() {
+                        obj.insert(alias.clone(), item.clone());
+                    }
+                    let res = Self::evaluate_sync(map_expr, &local_ctx)?;
+                    result_arr.push(res.into_owned());
+                }
+                Ok(CowData::Owned(JsonValue::Array(result_arr)))
+            }
+            Expr::Filter { list, alias, condition } => {
+                let list_val = Self::evaluate_sync(list, context)?;
+                let arr: &Vec<JsonValue> = list_val.as_array().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"expected": "array"})))?;
+                let mut result_arr = Vec::new();
+                for item in arr {
+                    let mut local_ctx = context.clone();
+                    if let Some(obj) = local_ctx.as_object_mut() {
+                        obj.insert(alias.clone(), item.clone());
+                    }
+                    let cond_res = Self::evaluate_sync(condition, &local_ctx)?;
+                    if is_truthy(&cond_res) {
+                        result_arr.push(item.clone());
+                    }
+                }
+                Ok(CowData::Owned(JsonValue::Array(result_arr)))
+            }
+
+            Expr::RegexMatch { value, pattern } => {
+                let v_str = Self::evaluate_sync(value, context)?;
+                let p_str = Self::evaluate_sync(pattern, context)?;
+                let v = v_str.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let p = p_str.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let re = TextRegex::new(p).map_err(|e| build_error!("ERR_RULE_INVALID_REGEX", error = e))?;
+                Ok(CowData::Owned(JsonValue::Bool(re.is_match(v))))
+            }
+            Expr::Concat(list) => {
+                let mut res = String::new();
+                for e in list {
+                    let v = Self::evaluate_sync(e, context)?;
+                    res.push_str(v.as_str().unwrap_or(&v.to_string()));
+                }
+                Ok(CowData::Owned(JsonValue::String(res)))
+            }
+            Expr::Replace { value, pattern, replacement } => {
+                let v_val = Self::evaluate_sync(value, context)?;
+                let p_val = Self::evaluate_sync(pattern, context)?;
+                let r_val = Self::evaluate_sync(replacement, context)?;
+                let v = v_val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let p = p_val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let r = r_val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                Ok(CowData::Owned(JsonValue::String(v.replace(p, r))))
+            }
+
+            Expr::Upper(e) => {
+                let val = Self::evaluate_sync(e, context)?;
+                let s = val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                Ok(CowData::Owned(JsonValue::String(s.to_uppercase())))
+            }
+            Expr::Lower(e) => {
+                let val = Self::evaluate_sync(e, context)?;
+                let s = val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                Ok(CowData::Owned(JsonValue::String(s.to_lowercase())))
+            }
+            Expr::Trim(e) => {
+                let val = Self::evaluate_sync(e, context)?;
+                let s = val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                Ok(CowData::Owned(JsonValue::String(s.trim().to_string())))
+            }
+            Expr::Len(e) => {
+                let val = Self::evaluate_sync(e, context)?;
+                let len = match val.as_ref() {
+                    JsonValue::Array(arr) => arr.len(),
+                    JsonValue::String(s) => s.chars().count(),
+                    JsonValue::Object(obj) => obj.len(),
+                    _ => raise_error!("ERR_RULE_TYPE_MISMATCH", context = json_value!({"operation": "LEN"})),
+                };
+                Ok(CowData::Owned(json_value!(len)))
+            }
+
+            Expr::If { condition, then_branch, else_branch } => {
+                let val_cond = Self::evaluate_sync(condition, context)?;
+                if is_truthy(&val_cond) {
+                    Self::evaluate_sync(then_branch, context)
+                } else {
+                    Self::evaluate_sync(else_branch, context)
+                }
+            }
+
+            Expr::IsA(class_name) => {
+                let mut is_match = false;
+                if let Some(t_val) = context.get("@type") {
+                    let check_match = |s: &str| -> bool {
+                        s == class_name || s.ends_with(&format!(":{}", class_name)) || s.ends_with(&format!("#{}", class_name))
+                    };
+                    if let Some(type_str) = t_val.as_str() {
+                        is_match = check_match(type_str);
+                    } else if let Some(type_arr) = t_val.as_array() {
+                        is_match = type_arr.iter().filter_map(|v| v.as_str()).any(check_match);
+                    }
+                }
+                Ok(CowData::Owned(JsonValue::Bool(is_match)))
+            }
+
+            Expr::Now => Ok(CowData::Owned(json_value!(UtcClock::now().to_rfc3339()))),
+            Expr::DateAdd { date, days } => {
+                let d_val = Self::evaluate_sync(date, context)?;
+                let days_res = Self::evaluate_sync(days, context)?;
+                let days_val = days_res.as_i64().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let d_str = d_val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+
+                if let Ok(local_dt) = d_str.parse::<LocalTimestamp>() {
+                    Ok(CowData::Owned(json_value!((local_dt + CalendarDuration::days(days_val)).to_rfc3339())))
+                } else if let Ok(nd) = CalendarDate::parse_from_str(d_str, "%Y-%m-%d") {
+                    Ok(CowData::Owned(json_value!((nd + CalendarDuration::days(days_val)).format("%Y-%m-%d").to_string())))
+                } else {
+                    raise_error!("ERR_RULE_INVALID_DATE", error = format!("Format de date invalide : {}", d_str));
+                }
+            }
+            Expr::DateDiff { start, end } => {
+                let start_val = Self::evaluate_sync(start, context)?;
+                let end_val = Self::evaluate_sync(end, context)?;
+                let s_str = start_val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let e_str = end_val.as_str().ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+
+                if let (Ok(s_dt), Ok(e_dt)) = (s_str.parse::<LocalTimestamp>(), e_str.parse::<LocalTimestamp>()) {
+                    Ok(CowData::Owned(json_value!((e_dt - s_dt).num_days())))
+                } else if let (Ok(s_nd), Ok(e_nd)) = (CalendarDate::parse_from_str(s_str, "%Y-%m-%d"), CalendarDate::parse_from_str(e_str, "%Y-%m-%d")) {
+                    Ok(CowData::Owned(json_value!((e_nd - s_nd).num_days())))
+                } else {
+                    raise_error!("ERR_RULE_INVALID_DATE");
+                }
+            }
+
+            Expr::Lookup { .. } => raise_error!(
+                "ERR_RULE_UNEXPECTED_ASYNC",
+                error = "Le nœud Lookup nécessite une évaluation asynchrone mais a été routé en synchrone."
+            ),
+        }
+    }
+
+    // ========================================================================
+    // 3. LE MOTEUR ASYNCHRONE (VOIE LENTE - DÉLÉGATION)
+    // ========================================================================
+
+    async fn evaluate_async<'a>(
         expr: &'a Expr,
         context: &'a JsonValue,
         provider: &dyn DataProvider,
@@ -33,9 +409,9 @@ impl Evaluator {
             Expr::Val(v) => Ok(CowData::Borrowed(v)),
             Expr::Var(path) => resolve_path(context, path),
 
-            // --- Opérateurs Logiques ---
             Expr::And(list) => {
                 for e in list {
+                    // 🎯 DÉLÉGATION AU ROUTEUR : Permet aux sous-branches de redevenir Sync
                     let val = Box::pin(Self::evaluate(e, context, provider)).await?;
                     if !is_truthy(&val) {
                         return Ok(CowData::Owned(JsonValue::Bool(false)));
@@ -57,7 +433,6 @@ impl Evaluator {
                 Ok(CowData::Owned(JsonValue::Bool(!is_truthy(&res))))
             }
 
-            // --- Comparaisons ---
             Expr::Eq(args) => {
                 if args.len() < 2 {
                     return Ok(CowData::Owned(JsonValue::Bool(true)));
@@ -79,52 +454,38 @@ impl Evaluator {
                 let b = Box::pin(Self::evaluate(&args[1], context, provider)).await?;
                 Ok(CowData::Owned(JsonValue::Bool(a != b)))
             }
-            Expr::Gt(a, b) => compare_nums(a, b, context, provider, |x, y| x > y).await,
-            Expr::Lt(a, b) => compare_nums(a, b, context, provider, |x, y| x < y).await,
-            Expr::Gte(a, b) => compare_nums(a, b, context, provider, |x, y| x >= y).await,
-            Expr::Lte(a, b) => compare_nums(a, b, context, provider, |x, y| x <= y).await,
+            Expr::Gt(a, b) => compare_nums_async(a, b, context, provider, |x, y| x > y).await,
+            Expr::Lt(a, b) => compare_nums_async(a, b, context, provider, |x, y| x < y).await,
+            Expr::Gte(a, b) => compare_nums_async(a, b, context, provider, |x, y| x >= y).await,
+            Expr::Lte(a, b) => compare_nums_async(a, b, context, provider, |x, y| x <= y).await,
 
-            // --- Mathématiques ---
-            Expr::Add(list) => fold_nums(list, context, provider, 0.0, |acc, x| acc + x).await,
-            Expr::Mul(list) => fold_nums(list, context, provider, 1.0, |acc, x| acc * x).await,
+            Expr::Add(list) => {
+                fold_nums_async(list, context, provider, 0.0, |acc, x| acc + x).await
+            }
+            Expr::Mul(list) => {
+                fold_nums_async(list, context, provider, 1.0, |acc, x| acc * x).await
+            }
             Expr::Sub(list) => {
                 if list.is_empty() {
                     return Ok(CowData::Owned(json_value!(0)));
                 }
                 let first_val = Box::pin(Self::evaluate(&list[0], context, provider)).await?;
-
-                // Initialisation sécurisée et typée de l'accumulateur
                 let mut acc: f64 = match first_val.as_f64() {
                     Some(num) => num,
                     None => raise_error!(
                         "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "operation": "aggregation_init",
-                            "expected": "number (f64)",
-                            "received": first_val,
-                            "item_index": 0,
-                            "hint": "Le premier élément de la liste doit être un nombre pour initialiser l'opération."
-                        })
+                        context = json_value!({"operation": "aggregation_init", "expected": "number (f64)", "received": first_val, "item_index": 0})
                     ),
                 };
                 for (index, e) in list[1..].iter().enumerate() {
                     let current_val = Box::pin(Self::evaluate(e, context, provider)).await?;
-
-                    // Extraction numérique avec garde-fou
                     let val: f64 = match current_val.as_f64() {
                         Some(num) => num,
                         None => raise_error!(
                             "ERR_RULE_TYPE_MISMATCH",
-                            context = json_value!({
-                                "operation": "subtraction_loop",
-                                "expected": "number (f64)",
-                                "received": current_val,
-                                "item_index": index + 1, // On ajuste l'index car on a skip le premier
-                                "hint": "Chaque élément de la liste de soustraction doit être un nombre."
-                            })
+                            context = json_value!({"operation": "subtraction_loop", "expected": "number", "received": current_val, "item_index": index + 1})
                         ),
                     };
-
                     acc -= val;
                 }
                 Ok(CowData::Owned(smart_number(acc)))
@@ -144,7 +505,6 @@ impl Evaluator {
                         error = "Le numérateur initial doit être un nombre"
                     ),
                 };
-
                 for e in list[1..].iter() {
                     let current_val = Box::pin(Self::evaluate(e, context, provider)).await?;
                     let val: f64 = match current_val.as_f64() {
@@ -166,52 +526,28 @@ impl Evaluator {
             }
             Expr::Abs(e) => {
                 let val = Box::pin(Self::evaluate(e, context, provider)).await?;
-
-                // Extraction numérique stricte
                 let v: f64 = match val.as_f64() {
                     Some(num) => num,
                     None => raise_error!(
                         "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "operation": "ABS",
-                            "expected": "number (f64)",
-                            "received": val,
-                            "hint": "La fonction ABS (valeur absolue) nécessite une valeur numérique en entrée."
-                        })
+                        context = json_value!({"operation": "ABS", "expected": "number", "received": val})
                     ),
                 };
-
                 Ok(CowData::Owned(smart_number(v.abs())))
             }
             Expr::Round { value, precision } => {
-                // 1. Évaluation de la valeur principale
                 let val_res = Box::pin(Self::evaluate(value, context, provider)).await?;
                 let v: f64 = match val_res.as_f64() {
                     Some(n) => n,
                     None => raise_error!(
                         "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "operation": "ROUND",
-                            "field": "value",
-                            "expected": "number",
-                            "received": val_res,
-                            "hint": "La valeur à arrondir doit être un nombre."
-                        })
+                        context = json_value!({"operation": "ROUND", "field": "value", "expected": "number", "received": val_res})
                     ),
                 };
-
-                // 2. Évaluation de la précision (on garde le défaut à 0, mais on valide le type si présent)
                 let prec_res = Box::pin(Self::evaluate(precision, context, provider)).await?;
-                let p: i32 = match prec_res.as_i64() {
-                    Some(n) => n as i32,
-                    None => 0, // Valeur par défaut si non spécifié ou type invalide
-                };
-
-                // 3. Calcul mathématique
+                let p: i32 = prec_res.as_i64().unwrap_or(0) as i32;
                 let factor = 10f64.powi(p);
-                let res = (v * factor).round() / factor;
-
-                Ok(CowData::Owned(smart_number(res)))
+                Ok(CowData::Owned(smart_number((v * factor).round() / factor)))
             }
 
             Expr::Min(e) => {
@@ -220,20 +556,14 @@ impl Evaluator {
                     Some(array) => array,
                     None => raise_error!(
                         "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "target": "rule_evaluation_result",
-                            "expected": "array",
-                            "received": val,
-                            "action": "evaluate_array_rule",
-                            "hint": "Le résultat de l'expression évaluée doit être un tableau pour cette règle."
-                        })
+                        context =
+                            json_value!({"operation": "MIN", "expected": "array", "received": val})
                     ),
                 };
                 let min = arr
                     .iter()
                     .filter_map(|v| v.as_f64())
                     .fold(f64::INFINITY, |a, b| a.min(b));
-
                 if min.is_infinite() {
                     Ok(CowData::Owned(JsonValue::Null))
                 } else {
@@ -246,20 +576,14 @@ impl Evaluator {
                     Some(array) => array,
                     None => raise_error!(
                         "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "operation": "MAX",
-                            "expected": "array",
-                            "received": val,
-                            "hint": "L'opération MAX nécessite un tableau de nombres en entrée."
-                        })
+                        context =
+                            json_value!({"operation": "MAX", "expected": "array", "received": val})
                     ),
                 };
-
                 let max = arr
                     .iter()
                     .filter_map(|v| v.as_f64())
                     .fold(f64::NEG_INFINITY, |a, b| a.max(b));
-
                 if max.is_infinite() {
                     Ok(CowData::Owned(JsonValue::Null))
                 } else {
@@ -270,50 +594,36 @@ impl Evaluator {
             Expr::Contains { list, value } => {
                 let list_val = Box::pin(Self::evaluate(list, context, provider)).await?;
                 let search_val = Box::pin(Self::evaluate(value, context, provider)).await?;
-
                 let found = match list_val.as_array() {
                     Some(arr) => arr.contains(&*search_val),
                     None => match list_val.as_str() {
                         Some(s) => {
-                            let search_str = match search_val.as_str() {
-                                Some(ss) => ss,
-                                None => raise_error!(
-                                    "ERR_RULE_TYPE_MISMATCH",
-                                    context = json_value!({"expected": "string", "hint": "Recherche dans une chaîne nécessite une chaîne."})
-                                ),
-                            };
+                            let search_str = search_val
+                                .as_str()
+                                .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
                             s.contains(search_str)
                         }
                         None => raise_error!(
                             "ERR_RULE_TYPE_MISMATCH",
-                            context = json_value!({ "operation": "CONTAINS", "expected": ["array", "string"], "received": list_val })
+                            context = json_value!({ "operation": "CONTAINS" })
                         ),
                     },
                 };
                 Ok(CowData::Owned(JsonValue::Bool(found)))
             }
 
-            // --- Collections & Itérations ---
             Expr::Map {
                 list,
                 alias,
                 expr: map_expr,
             } => {
                 let list_val = Box::pin(Self::evaluate(list, context, provider)).await?;
-                let arr: &Vec<JsonValue> = match list_val.as_array() {
-                    Some(array) => array,
-                    None => raise_error!(
+                let arr: &Vec<JsonValue> = list_val.as_array().ok_or_else(|| {
+                    build_error!(
                         "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "target": "list_operation",
-                            "expected": "array",
-                            "received": list_val,
-                            "action": "process_collection",
-                            "hint": "L'opération attend un tableau de données. Vérifiez que la propriété ciblée n'est pas nulle ou d'un autre type."
-                        })
-                    ),
-                };
-
+                        context = json_value!({"expected": "array"})
+                    )
+                })?;
                 let mut result_arr = Vec::new();
                 for item in arr {
                     let mut local_ctx = context.clone();
@@ -331,20 +641,12 @@ impl Evaluator {
                 condition,
             } => {
                 let list_val = Box::pin(Self::evaluate(list, context, provider)).await?;
-                // Extraction sécurisée avec annotation de type pour stabiliser l'inférence
-                let arr: &Vec<JsonValue> = match list_val.as_array() {
-                    Some(array) => array,
-                    None => raise_error!(
+                let arr: &Vec<JsonValue> = list_val.as_array().ok_or_else(|| {
+                    build_error!(
                         "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "target": "list_operation",
-                            "expected": "array",
-                            "received": list_val,
-                            "action": "process_collection",
-                            "hint": "L'opération attend un tableau de données. Vérifiez que la propriété ciblée n'est pas nulle ou d'un autre type."
-                        })
-                    ),
-                };
+                        context = json_value!({"expected": "array"})
+                    )
+                })?;
                 let mut result_arr = Vec::new();
                 for item in arr {
                     let mut local_ctx = context.clone();
@@ -360,48 +662,17 @@ impl Evaluator {
                 Ok(CowData::Owned(JsonValue::Array(result_arr)))
             }
 
-            // --- String & Regex ---
             Expr::RegexMatch { value, pattern } => {
                 let v_str = Box::pin(Self::evaluate(value, context, provider)).await?;
                 let p_str = Box::pin(Self::evaluate(pattern, context, provider)).await?;
-                let v = match v_str.as_str() {
-                    Some(s) => s,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "target": "validation_value",
-                            "expected": "string",
-                            "received": v_str,
-                            "action": "extract_value_for_regex",
-                            "hint": "La valeur à comparer doit être une chaîne de caractères pour être traitée par une Regex."
-                        })
-                    ),
-                };
-                let p = match p_str.as_str() {
-                    Some(s) => s,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "expected": "string",
-                            "received": p_str,
-                            "action": "parse_rule_pattern",
-                            "hint": "La règle attend une chaîne de caractères (Regex). Vérifiez que la valeur n'est pas un nombre ou un booléen dans votre fichier JSON."
-                        })
-                    ),
-                };
-
-                let re = match TextRegex::new(p) {
-                    Ok(r) => r,
-                    Err(e) => raise_error!(
-                        "ERR_RULE_INVALID_REGEX",
-                        error = e,
-                        context = json_value!({
-                            "pattern": p,
-                            "action": "compile_validation_rule",
-                            "hint": "La syntaxe de l'expression régulière est invalide. Vérifiez les caractères d'échappement et les groupes."
-                        })
-                    ),
-                };
+                let v = v_str
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let p = p_str
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let re = TextRegex::new(p)
+                    .map_err(|e| build_error!("ERR_RULE_INVALID_REGEX", error = e))?;
                 Ok(CowData::Owned(JsonValue::Bool(re.is_match(v))))
             }
             Expr::Concat(list) => {
@@ -412,7 +683,6 @@ impl Evaluator {
                 }
                 Ok(CowData::Owned(JsonValue::String(res)))
             }
-
             Expr::Replace {
                 value,
                 pattern,
@@ -421,118 +691,53 @@ impl Evaluator {
                 let v_val = Box::pin(Self::evaluate(value, context, provider)).await?;
                 let p_val = Box::pin(Self::evaluate(pattern, context, provider)).await?;
                 let r_val = Box::pin(Self::evaluate(replacement, context, provider)).await?;
-
-                // 1. Extraction de la valeur (v)
-                let v = match v_val.as_str() {
-                    Some(s) => s,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({ "target": "v_val", "expected": "string", "received": v_val })
-                    ),
-                };
-
-                // 2. Extraction du pattern (p)
-                let p = match p_val.as_str() {
-                    Some(s) => s,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({ "target": "p_val", "expected": "string", "received": p_val })
-                    ),
-                };
-
-                // 3. Extraction du remplacement ou résultat (r)
-                let r = match r_val.as_str() {
-                    Some(s) => s,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({ "target": "r_val", "expected": "string", "received": r_val })
-                    ),
-                };
-
+                let v = v_val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let p = p_val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let r = r_val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
                 Ok(CowData::Owned(JsonValue::String(v.replace(p, r))))
             }
 
             Expr::Upper(e) => {
                 let val = Box::pin(Self::evaluate(e, context, provider)).await?;
-
-                // Extraction sécurisée du texte à transformer
-                let s = match val.as_str() {
-                    Some(string_value) => string_value,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "operation": "UPPER",
-                            "expected": "string",
-                            "received": val,
-                            "hint": "La fonction UPPER ne peut transformer que des chaînes de caractères."
-                        })
-                    ),
-                };
-
+                let s = val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
                 Ok(CowData::Owned(JsonValue::String(s.to_uppercase())))
             }
             Expr::Lower(e) => {
                 let val = Box::pin(Self::evaluate(e, context, provider)).await?;
-
-                // Extraction impérative pour stabiliser le type 's'
-                let s = match val.as_str() {
-                    Some(string_value) => string_value,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "operation": "LOWER",
-                            "expected": "string",
-                            "received": val,
-                            "hint": "La fonction LOWER nécessite une chaîne de caractères en entrée."
-                        })
-                    ),
-                };
-
+                let s = val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
                 Ok(CowData::Owned(JsonValue::String(s.to_lowercase())))
             }
             Expr::Trim(e) => {
                 let val = Box::pin(Self::evaluate(e, context, provider)).await?;
-
-                // Extraction impérative pour un typage fort
-                let s = match val.as_str() {
-                    Some(string_value) => string_value,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "operation": "TRIM",
-                            "expected": "string",
-                            "received": val,
-                            "hint": "La fonction TRIM ne peut traiter que des chaînes de caractères (suppression des espaces)."
-                        })
-                    ),
-                };
-
+                let s = val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
                 Ok(CowData::Owned(JsonValue::String(s.trim().to_string())))
             }
-
             Expr::Len(e) => {
                 let val = Box::pin(Self::evaluate(e, context, provider)).await?;
-
-                // Calcul de la longueur avec validation de type stricte
                 let len = match val.as_ref() {
                     JsonValue::Array(arr) => arr.len(),
-                    JsonValue::String(s) => s.chars().count(), // Gestion correcte de l'Unicode
+                    JsonValue::String(s) => s.chars().count(),
                     JsonValue::Object(obj) => obj.len(),
                     _ => raise_error!(
                         "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "operation": "LEN",
-                            "expected": ["array", "string", "object"],
-                            "received": val,
-                            "hint": "La fonction LEN ne peut être calculée que sur des listes, des chaînes ou des objets."
-                        })
+                        context = json_value!({"operation": "LEN"})
                     ),
                 };
-
                 Ok(CowData::Owned(json_value!(len)))
             }
 
-            // --- Structure de Contrôle ---
             Expr::If {
                 condition,
                 then_branch,
@@ -546,135 +751,75 @@ impl Evaluator {
                 }
             }
 
-            // --- Ontologie & Sémantique ---
             Expr::IsA(class_name) => {
                 let mut is_match = false;
-
-                // On cherche l'identité sémantique injectée par ton schéma DDL
                 if let Some(t_val) = context.get("@type") {
                     let check_match = |s: &str| -> bool {
-                        // Supporte la correspondance exacte ("Database")
-                        // ou avec namespace ("raise:Database" ou "https://raise.io/ontology/raise#Database")
                         s == class_name
                             || s.ends_with(&format!(":{}", class_name))
                             || s.ends_with(&format!("#{}", class_name))
                     };
-
                     if let Some(type_str) = t_val.as_str() {
                         is_match = check_match(type_str);
                     } else if let Some(type_arr) = t_val.as_array() {
                         is_match = type_arr.iter().filter_map(|v| v.as_str()).any(check_match);
                     }
                 }
-
                 Ok(CowData::Owned(JsonValue::Bool(is_match)))
             }
-            // --- Dates ---
+
             Expr::Now => Ok(CowData::Owned(json_value!(UtcClock::now().to_rfc3339()))),
             Expr::DateAdd { date, days } => {
                 let d_val = Box::pin(Self::evaluate(date, context, provider)).await?;
                 let days_res = Box::pin(Self::evaluate(days, context, provider)).await?;
-                let days_val = match days_res.as_i64() {
-                    Some(d) => d,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({ "expected": "integer", "received": days_res, "hint": "DateAdd nécessite un nombre de jours entier." })
-                    ),
-                };
-                let d_str = match d_val.as_str() {
-                    Some(s) => s,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "target": "d_val",
-                            "expected": "string",
-                            "received": d_val,
-                            "action": "evaluate_expression_result",
-                            "hint": "La valeur évaluée pour ce paramètre doit être une chaîne de caractères."
-                        })
-                    ),
-                };
+                let days_val = days_res
+                    .as_i64()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let d_str = d_val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
 
                 if let Ok(local_dt) = d_str.parse::<LocalTimestamp>() {
                     Ok(CowData::Owned(json_value!((local_dt
                         + CalendarDuration::days(days_val))
                     .to_rfc3339())))
-
-                // 🎯 3. CalendarDate fait déjà partie de ta façade !
                 } else if let Ok(nd) = CalendarDate::parse_from_str(d_str, "%Y-%m-%d") {
                     Ok(CowData::Owned(json_value!((nd
                         + CalendarDuration::days(days_val))
                     .format("%Y-%m-%d")
                     .to_string())))
                 } else {
-                    crate::raise_error!(
+                    raise_error!(
                         "ERR_RULE_INVALID_DATE",
                         error = format!("Format de date invalide : {}", d_str)
                     );
                 }
             }
             Expr::DateDiff { start, end } => {
-                // 1. Évaluation asynchrone des deux opérandes
                 let start_val = Box::pin(Self::evaluate(start, context, provider)).await?;
                 let end_val = Box::pin(Self::evaluate(end, context, provider)).await?;
+                let s_str = start_val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+                let e_str = end_val
+                    .as_str()
+                    .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
 
-                // 2. Extraction stricte avec typage (Fail-Fast)
-                let s_str = match start_val.as_str() {
-                    Some(s) => s,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "target": "start_date",
-                            "expected": "string",
-                            "received": start_val,
-                            "hint": "La date de début doit être une chaîne de caractères."
-                        })
-                    ),
-                };
-
-                let e_str = match end_val.as_str() {
-                    Some(s) => s,
-                    None => raise_error!(
-                        "ERR_RULE_TYPE_MISMATCH",
-                        context = json_value!({
-                            "target": "end_date",
-                            "expected": "string",
-                            "received": end_val,
-                            "hint": "La date de fin doit être une chaîne de caractères."
-                        })
-                    ),
-                };
-
-                // 3. 🎯 Résolution "Zéro Dette" : Support RFC3339 et YYYY-MM-DD
                 if let (Ok(s_dt), Ok(e_dt)) = (
                     s_str.parse::<LocalTimestamp>(),
                     e_str.parse::<LocalTimestamp>(),
                 ) {
-                    // Soustraction de timestamps complets
-                    let diff = e_dt - s_dt;
-                    Ok(CowData::Owned(json_value!(diff.num_days())))
+                    Ok(CowData::Owned(json_value!((e_dt - s_dt).num_days())))
                 } else if let (Ok(s_nd), Ok(e_nd)) = (
                     CalendarDate::parse_from_str(s_str, "%Y-%m-%d"),
                     CalendarDate::parse_from_str(e_str, "%Y-%m-%d"),
                 ) {
-                    // Soustraction de dates calendaires simples
-                    let diff = e_nd - s_nd;
-                    Ok(CowData::Owned(json_value!(diff.num_days())))
+                    Ok(CowData::Owned(json_value!((e_nd - s_nd).num_days())))
                 } else {
-                    raise_error!(
-                        "ERR_RULE_INVALID_DATE",
-                        error = format!(
-                            "Format de date invalide pour DateDiff : start='{}', end='{}'",
-                            s_str, e_str
-                        ),
-                        context = json_value!({
-                            "action": "evaluate_date_diff",
-                            "hint": "Les dates doivent être au format RFC3339 ou YYYY-MM-DD."
-                        })
-                    );
+                    raise_error!("ERR_RULE_INVALID_DATE");
                 }
             }
-            // --- Lookup (ASYNCHRONE) ---
+
             Expr::Lookup {
                 collection,
                 id,
@@ -692,10 +837,53 @@ impl Evaluator {
     }
 }
 
-// --- Helpers ---
+// ============================================================================
+// 4. HELPERS D'ÉVALUATION (DUAL-ENGINE)
+// ============================================================================
 
-// 🎯 MIGRATION : Remplacement du Result par RaiseResult
-async fn compare_nums<'a, F>(
+// --- HELPERS SYNCHRONES ---
+fn compare_nums_sync<'a, F>(
+    a: &Expr,
+    b: &Expr,
+    c: &'a JsonValue,
+    op: F,
+) -> RaiseResult<CowData<'a, JsonValue>>
+where
+    F: Fn(f64, f64) -> bool,
+{
+    let val_a = Evaluator::evaluate_sync(a, c)?;
+    let va: f64 = val_a
+        .as_f64()
+        .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+    let val_b = Evaluator::evaluate_sync(b, c)?;
+    let vb: f64 = val_b
+        .as_f64()
+        .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+    Ok(CowData::Owned(JsonValue::Bool(op(va, vb))))
+}
+
+fn fold_nums_sync<'a, F>(
+    list: &[Expr],
+    c: &'a JsonValue,
+    init: f64,
+    op: F,
+) -> RaiseResult<CowData<'a, JsonValue>>
+where
+    F: Fn(f64, f64) -> f64,
+{
+    let mut acc = init;
+    for e in list.iter() {
+        let current_val = Evaluator::evaluate_sync(e, c)?;
+        let val: f64 = current_val
+            .as_f64()
+            .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
+        acc = op(acc, val);
+    }
+    Ok(CowData::Owned(smart_number(acc)))
+}
+
+// --- HELPERS ASYNCHRONES ---
+async fn compare_nums_async<'a, F>(
     a: &Expr,
     b: &Expr,
     c: &'a JsonValue,
@@ -706,40 +894,17 @@ where
     F: Fn(f64, f64) -> bool,
 {
     let val_a = Box::pin(Evaluator::evaluate(a, c, p)).await?;
-
-    // Extraction impérative avec typage explicite pour stabiliser l'inférence
-    let va: f64 = match val_a.as_f64() {
-        Some(num) => num,
-        None => raise_error!(
-            "ERR_RULE_TYPE_MISMATCH",
-            context = json_value!({
-                "expected": "number (f64)",
-                "received": val_a,
-                "action": "numeric_comparison",
-                "hint": "L'opération nécessite une valeur numérique. Vérifiez que l'expression n'évalue pas à une chaîne ou un objet."
-            })
-        ),
-    };
+    let va: f64 = val_a
+        .as_f64()
+        .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
     let val_b = Box::pin(Evaluator::evaluate(b, c, p)).await?;
-
-    // Extraction impérative pour vb
-    let vb: f64 = match val_b.as_f64() {
-        Some(num) => num,
-        None => raise_error!(
-            "ERR_RULE_TYPE_MISMATCH",
-            context = json_value!({
-                "expected": "number (f64)",
-                "side": "right-hand / operand B",
-                "received": val_b,
-                "action": "numeric_comparison",
-                "hint": "Le deuxième membre de la comparaison n'est pas un nombre valide."
-            })
-        ),
-    };
+    let vb: f64 = val_b
+        .as_f64()
+        .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
     Ok(CowData::Owned(JsonValue::Bool(op(va, vb))))
 }
 
-async fn fold_nums<'a, F>(
+async fn fold_nums_async<'a, F>(
     list: &[Expr],
     c: &'a JsonValue,
     p: &dyn DataProvider,
@@ -750,28 +915,19 @@ where
     F: Fn(f64, f64) -> f64,
 {
     let mut acc = init;
-    for (index, e) in list.iter().enumerate() {
+    for e in list.iter() {
         let current_val = Box::pin(Evaluator::evaluate(e, c, p)).await?;
-
-        // Extraction numérique impérative
-        let val: f64 = match current_val.as_f64() {
-            Some(num) => num,
-            None => raise_error!(
-                "ERR_RULE_TYPE_MISMATCH",
-                context = json_value!({
-                    "operation": "aggregation",
-                    "expected": "number (f64)",
-                    "received": current_val,
-                    "item_index": index,
-                    "hint": "Tous les éléments de la liste doivent être des nombres pour cette opération mathématique."
-                })
-            ),
-        };
-
+        let val: f64 = current_val
+            .as_f64()
+            .ok_or_else(|| build_error!("ERR_RULE_TYPE_MISMATCH"))?;
         acc = op(acc, val);
     }
     Ok(CowData::Owned(smart_number(acc)))
 }
+
+// ============================================================================
+// 5. HELPERS PURS (INCHANGÉS)
+// ============================================================================
 
 fn smart_number(n: f64) -> JsonValue {
     if n.fract() == 0.0 {
@@ -795,22 +951,12 @@ pub(crate) fn resolve_path<'a>(
                 Some(val) => val,
                 None => raise_error!(
                     "ERR_RULE_VAR_NOT_FOUND",
-                    context = json_value!({
-                        "path": path,
-                        "missing_part": part,
-                        "action": "resolve_json_path",
-                        "hint": format!("Le champ '{}' est introuvable dans l'objet actuel.", part)
-                    })
+                    context = json_value!({ "path": path, "missing_part": part })
                 ),
             },
             _ => raise_error!(
                 "ERR_RULE_PATH_RESOLUTION_FAIL",
-                context = json_value!({
-                    "path": path,
-                    "failed_at": part,
-                    "reason": "La valeur parente n'est pas un objet (map).",
-                    "current_value": current
-                })
+                context = json_value!({ "path": path, "failed_at": part })
             ),
         };
     }
@@ -826,6 +972,10 @@ fn is_truthy(v: &JsonValue) -> bool {
         _ => true,
     }
 }
+
+// =========================================================================
+// TESTS UNITAIRES
+// =========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -885,7 +1035,6 @@ mod tests {
         let provider = NoOpDataProvider;
         let ctx = json_value!({});
 
-        // Test : "2026-04-30" - "2026-04-28" = 2 jours
         let expr = Expr::DateDiff {
             start: Box::new(Expr::Val(json_value!("2026-04-28"))),
             end: Box::new(Expr::Val(json_value!("2026-04-30"))),
@@ -899,20 +1048,16 @@ mod tests {
     #[async_test]
     async fn test_isa_ontological_evaluation() -> RaiseResult<()> {
         let provider = NoOpDataProvider;
-
-        // Un document typique de ta DB (avec son ancrage injecté)
         let ctx = json_value!({
             "@context": "db://_system/master/_ontologies/handle/onto-raise-core",
             "@type": ["raise:Database", "pa:PhysicalComponent"],
             "handle": "master"
         });
 
-        // 1. Règle : Est-ce une Database ? (Doit être VRAI)
         let expr_true = Expr::IsA("Database".to_string());
         let res_true = Evaluator::evaluate(&expr_true, &ctx, &provider).await?;
         assert_eq!(res_true.as_bool(), Some(true));
 
-        // 2. Règle : Est-ce un User ? (Doit être FAUX)
         let expr_false = Expr::IsA("User".to_string());
         let res_false = Evaluator::evaluate(&expr_false, &ctx, &provider).await?;
         assert_eq!(res_false.as_bool(), Some(false));

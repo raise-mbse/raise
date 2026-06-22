@@ -4,26 +4,14 @@ use clap::{Args, Subcommand};
 use raise_core::{user_error, user_info, user_success, utils::prelude::*};
 
 // --- IMPORTS MÉTIER RAISE ---
-use raise_core::ai::agents::intent_classifier::{EngineeringIntent, IntentClassifier};
-use raise_core::ai::agents::software_agent::SoftwareAgent;
-use raise_core::ai::agents::tools::query_knowledge_graph;
-use raise_core::ai::agents::{dynamic_agent::DynamicAgent, Agent, AgentContext};
-
-use raise_core::json_db::collections::manager::CollectionsManager;
-
-use raise_core::ai::context::rag::RagRetriever;
-use raise_core::ai::llm::client::LlmClient;
-
-use raise_core::ai::voice::stt::WhisperEngine;
-
-use raise_core::utils::data::json::Clearance;
-use raise_core::utils::io::audio::AudioListener;
-
-use raise_core::ai::agents::prompt_engine::PromptEngine;
-use raise_core::ai::agents::tools::extract_json_from_llm;
+use raise_core::ai::agents::intent_classifier::EngineeringIntent;
+use raise_core::ai::agents::AgentResult;
 use raise_core::ai::assurance::health::RaiseHealthEngine;
+use raise_core::ai::context::rag::RagRetriever;
+use raise_core::ai::voice::stt::WhisperEngine;
+use raise_core::json_db::collections::manager::CollectionsManager;
 use raise_core::services::ai_service::validate_arcadia_gnn;
-use raise_core::services::model_service::ingest_arcadia_elements;
+use raise_core::utils::io::audio::AudioListener;
 
 use crate::CliContext;
 
@@ -99,7 +87,7 @@ pub enum AiCommands {
         #[arg(long)]
         out: Option<String>,
 
-        /// 🎯 NOUVEAU : Ingestion automatique dans la base de données cible
+        /// 🎯 Ingestion automatique dans la base de données cible
         #[arg(short, long)]
         ingest: bool,
     },
@@ -163,6 +151,26 @@ pub enum RagAction {
     },
 }
 
+// 🎯 NOUVELLE FONCTION UTILITAIRE (Affichage CLI uniquement)
+fn display_agent_result(intent: &EngineeringIntent, agent_urn: &str, result: Option<AgentResult>) {
+    user_info!(
+        "AI_ANALYZING",
+        json_value!({"intent": format!("{:?}", intent)})
+    );
+    user_info!("AI_AGENT_START", json_value!({ "agent": agent_urn }));
+
+    match result {
+        Some(res) => {
+            user_success!("AI_RESULT", json_value!({ "message": res.message }));
+            for a in res.artifacts {
+                user_info!("AI_ARTIFACT_GENERATED", json_value!({ "path": a.path }));
+            }
+        }
+        None => user_info!("AI_SIMULATION_MODE", json_value!({})),
+    }
+}
+
+// 🎯 HANDLE ALLÉGÉ : Délégation totale à ai_service.rs
 pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
     // 1. GESTION DE SESSION OBLIGATOIRE (Heartbeat global pour toutes les commandes)
     let _ = ctx.session_mgr.touch().await;
@@ -185,83 +193,13 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
         ),
     };
 
-    let dataset_path = ctx
-        .config
-        .get_path("PATH_RAISE_DATASET")
-        .unwrap_or_else(|| domain_path.join("dataset"));
-
     fs::ensure_dir_async(&domain_path).await?;
-    let storage = ctx.storage.clone();
-
     let command = args.command.unwrap_or(AiCommands::Interactive);
+    let manager = CollectionsManager::new(&ctx.storage, &ctx.active_domain, &ctx.active_db);
 
-    // 2. EXÉCUTION DES COMMANDES SANS LLM (GNN et Entraînement Local)
-    if let AiCommands::Validate { uri_a, uri_b } = &command {
-        run_gnn_validation(&domain_path, uri_a, uri_b).await?;
-        return Ok(());
-    }
-
-    // 3. CHARGEMENT TARDIF DU LLM ET DU CONTEXTE AGENT (Mode Interactif & NLP)
-    let manager = raise_core::json_db::collections::manager::CollectionsManager::new(
-        &storage,
-        &ctx.active_domain,
-        &ctx.active_db,
-    );
-
-    if let AiCommands::Rag { action } = &command {
-        run_rag_action(domain_path.clone(), &manager, action.clone()).await?;
-        return Ok(());
-    }
-
-    let client = LlmClient::new(&manager, storage.clone(), ctx.kernel.native_llm.clone()).await?;
-
-    let current_session = ctx.session_mgr.get_current_session().await;
-    let session_id = current_session
-        .as_ref()
-        .map(|s| s.id.clone())
-        .unwrap_or_else(|| "cli_session".to_string());
-
-    // 1. On crée un manager pointant sur la partition système
-    let sys_manager = raise_core::json_db::collections::manager::CollectionsManager::new(
-        &storage,
-        &ctx.config.mount_points.system.domain,
-        &ctx.config.mount_points.system.db,
-    );
-    // 2. On récupère les settings du World Model (Zéro Dette)
-    let wm_settings =
-        AppConfig::get_runtime_settings(&sys_manager, "ref:components:handle:ai_world_model")
-            .await?;
-    let wm_config: raise_core::ai::world_model::engine::WorldModelConfig =
-        match json::deserialize_from_value(wm_settings) {
-            Ok(cfg) => cfg,
-            Err(e) => raise_error!("ERR_WM_CONFIG_DESERIALIZE", error = e.to_string()),
-        };
-
-    // 🎯 FIX CRITIQUE : Suppression du expect() en production
-    let world_engine = match raise_core::ai::world_model::NeuroSymbolicEngine::new_empty(wm_config)
-    {
-        Ok(engine) => SharedRef::new(engine),
-        Err(e) => raise_error!(
-            "ERR_WORLD_ENGINE_INIT",
-            error = e.to_string(),
-            context = json_value!({"action": "initialize_neuro_symbolic_engine"})
-        ),
-    };
-
-    let agent_ctx = AgentContext::new(
-        &ctx.active_user,
-        &session_id,
-        storage.clone(),
-        client.clone(),
-        world_engine,
-        domain_path.clone(),
-        dataset_path,
-    )
-    .await?;
-
-    // 4. EXÉCUTION DES COMMANDES AGENTS/LLM
     match command {
-        AiCommands::Interactive => run_interactive_mode(&agent_ctx, &ctx, client).await?,
+        AiCommands::Interactive => run_interactive_mode(&ctx).await?,
+
         AiCommands::Listen => {
             let health = RaiseHealthEngine::check_engine_health(&manager).await?;
             if !health.acceleration_active {
@@ -270,20 +208,92 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
                     json_value!({"hint": "Whisper sans GPU risque de bloquer le CLI."})
                 );
             }
-            run_voice_mode(&agent_ctx, client, &manager).await?
+            run_voice_mode(&ctx, &manager).await?
         }
+
         AiCommands::Classify { input, execute } => {
-            process_input(&agent_ctx, &input, client, execute).await
+            match raise_core::services::ai_service::ai_classify_and_execute(
+                ctx.storage.clone(),
+                ctx.kernel.native_llm.clone(),
+                &ctx.active_domain,
+                &ctx.active_db,
+                &ctx.active_user,
+                &input,
+                execute,
+            )
+            .await
+            {
+                Ok((intent, agent_urn, agent_result)) => {
+                    display_agent_result(&intent, &agent_urn, agent_result)
+                }
+                Err(e) => raise_error!("ERR_AI_CLASSIFY_FAILED", error = e.to_string()),
+            }
         }
+
         AiCommands::Inspect { reference } => {
-            inspect_agent_logic(&agent_ctx, &reference, &ctx.active_domain, &ctx.active_db).await?;
+            user_info!("AI_INSPECT_START", json_value!({"target": reference}));
+            match raise_core::services::ai_service::ai_inspect_agent(
+                ctx.storage.clone(),
+                &ctx.active_domain,
+                &ctx.active_db,
+                &reference,
+            )
+            .await
+            {
+                Ok(data) => {
+                    let persona = data["persona"].as_str().unwrap_or("Inconnu");
+                    let directives = data["directives"].as_array().unwrap();
+                    user_success!(
+                        "AI_PROMPT_RESOLVED",
+                        json_value!({"persona": persona, "directives_count": directives.len()})
+                    );
+                    println!("\n📝 --- INSTRUCTIONS RÉCUPÉRÉES ---");
+                    println!("Identité : {}", persona);
+                    for (i, d) in directives.iter().enumerate() {
+                        println!("  {}. {}", i + 1, d.as_str().unwrap_or(""));
+                    }
+                }
+                Err(e) => raise_error!("ERR_AI_INSPECT_FAILED", error = e.to_string()),
+            }
+        }
+
+        AiCommands::Validate { uri_a, uri_b } => {
+            let root_path_str = domain_path.to_string_lossy().to_string();
+            let result = validate_arcadia_gnn(&root_path_str, &uri_a, &uri_b).await?;
+
+            let metrics = &result["metrics"];
+            let sim_initial = metrics["nlp_similarity"].as_f64().unwrap_or(0.0);
+            let sim_final = metrics["gnn_similarity"].as_f64().unwrap_or(0.0);
+            let delta = metrics["improvement"].as_f64().unwrap_or(0.0);
+            let confirmed = result["hypothesis_confirmed"].as_bool().unwrap_or(false);
+
+            println!("\n📊 --- RÉSULTAT DE L'EXPÉRIENCE GNN ---");
+            println!("Composant A : {}", uri_a);
+            println!("Composant B : {}", uri_b);
+            println!("Similarité Sémantique (NLP pur) : {:.4}", sim_initial);
+            println!("Similarité Structurelle (GNN)   : {:.4}", sim_final);
+
+            if confirmed {
+                user_success!(
+                    "✅ [MBSE] Hypothèse confirmée",
+                    json_value!({"improvement_pct": delta * 100.0})
+                );
+                println!("Conclusion : La topologie du système renforce le lien entre ces composants (+{:.2}%).", delta * 100.0);
+            } else {
+                user_warn!(
+                    "⚠️ [MBSE] Hypothèse rejetée",
+                    json_value!({"improvement_pct": delta * 100.0})
+                );
+                println!("Conclusion : La structure globale ne justifie pas une allocation forte entre ces composants.");
+            }
+        }
+
+        AiCommands::Rag { action } => {
+            run_rag_action(domain_path.clone(), &manager, action.clone()).await?;
         }
 
         AiCommands::Ask { query } => {
-            // On verrouille l'orchestrateur partagé injecté par main.rs
             let mut orch = orch_ref.lock().await;
-
-            // Appel à l'interface simplifiée "ask" du noyau
             match orch.ask(&query).await {
                 Ok(response) => {
                     println!("\n🤖 RAISE :\n{}", response);
@@ -298,8 +308,12 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
         }
 
         AiCommands::Orchestrate { prompt } => {
-            let mut orch = orch_ref.lock().await;
-            match orch.execute_workflow(&prompt).await {
+            let squad_runner = {
+                let orch = orch_ref.lock().await;
+                orch.squad_runner()
+            };
+
+            match squad_runner.execute_workflow(&prompt).await {
                 Ok(res) => {
                     println!("{}", res.message);
                     user_success!(
@@ -315,20 +329,14 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
             let target_domain = domain.unwrap_or_else(|| ctx.active_domain.clone());
             user_info!("AI_AUDIT_START", json_value!({"domain": &target_domain}));
 
-            // 1. Initialisation du manager sur la partition système pour la persistance
-            let sys_manager = CollectionsManager::new(
-                &ctx.storage,
+            match raise_core::services::ai_service::ai_run_audit(
+                ctx.storage.clone(),
                 &ctx.config.mount_points.system.domain,
                 &ctx.config.mount_points.system.db,
-            );
-
-            // 2. Création d'un rapport de qualité (utilisant les moteurs du noyau)
-            let report =
-                raise_core::ai::assurance::QualityReport::new(&target_domain, &ctx.active_db);
-
-            // 3. Persistance du rapport via le module d'assurance
-            match raise_core::ai::assurance::persistence::save_quality_report(&sys_manager, &report)
-                .await
+                &target_domain,
+                &ctx.active_db,
+            )
+            .await
             {
                 Ok(id) => {
                     user_success!(
@@ -344,24 +352,52 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
             }
         }
 
+        AiCommands::Mutate { handle, prompt } => {
+            user_info!(
+                "AI_MUTATION_INIT",
+                json_value!({"target": handle, "instruction": prompt})
+            );
+
+            match raise_core::services::ai_service::ai_mutate_component(
+                ctx.storage.clone(),
+                ctx.kernel.native_llm.clone(),
+                &ctx.active_domain,
+                &ctx.active_db,
+                &ctx.active_user,
+                &handle,
+                &prompt,
+            )
+            .await?
+            {
+                Some(res) => {
+                    user_success!(
+                        "AI_MUTATION_SUCCESS",
+                        json_value!({"message": res.message, "artifacts": res.artifacts.len()})
+                    );
+                }
+                None => {
+                    user_warn!(
+                        "AI_MUTATION_SKIPPED",
+                        json_value!({"reason": "L'agent n'a rien retourné."})
+                    );
+                }
+            }
+        }
+
         AiCommands::Explain { target_id } => {
-            let config = AppConfig::get();
+            let config = raise_core::utils::data::config::AppConfig::get();
             let sys_manager = CollectionsManager::new(
                 &ctx.storage,
                 &config.mount_points.system.domain,
                 &config.mount_points.system.db,
             );
 
-            // 1. Récupération de la trame via le noyau certifié
             match raise_core::ai::assurance::get_xai_frame(&sys_manager, &target_id).await {
                 Ok(frame) => {
                     user_success!("AI_EXPLAIN_FOUND", json_value!({"id": target_id}));
-
-                    // 2. Affichage structuré du raisonnement
                     println!("\n🔍 RAISONNEMENT DE L'AGENT :");
                     println!("============================");
                     println!("{}", frame.summarize_for_llm());
-
                     if !frame.visual_artifacts.is_empty() {
                         println!(
                             "\n🖼️  ARTEFACTS VISUELS DISPONIBLES : {}",
@@ -374,18 +410,14 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
         }
 
         AiCommands::Health => {
-            let config = AppConfig::get();
+            let config = raise_core::utils::data::config::AppConfig::get();
             let sys_manager = CollectionsManager::new(
                 &ctx.storage,
                 &config.mount_points.system.domain,
                 &config.mount_points.system.db,
             );
 
-            match raise_core::ai::assurance::health::RaiseHealthEngine::check_engine_health(
-                &sys_manager,
-            )
-            .await
-            {
+            match RaiseHealthEngine::check_engine_health(&sys_manager).await {
                 Ok(report) => {
                     user_success!("AI_HEALTH_REPORT", json_value!(report));
                     println!("\n🩺 RAPPORT DE SANTÉ IA");
@@ -418,76 +450,52 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
             out,
             ingest,
         } => {
-            run_execute_action(&ctx, client, &prompt_handle, vars, out, ingest).await?;
-        }
+            user_info!("AI_EXECUTE_START", json_value!({"prompt": prompt_handle}));
+            println!("🤖 Inférence RAISE en cours ({})...", prompt_handle);
 
-        AiCommands::Mutate { handle, prompt } => {
-            user_info!(
-                "AI_MUTATION_INIT",
-                json_value!({"target": handle, "instruction": prompt})
-            );
-
-            // 1. Forger l'intention
-            let intent = EngineeringIntent::MutateCode {
-                module_name: "auto".to_string(),
-                target_handle: handle.clone(),
-                instruction: prompt.clone(),
-            };
-
-            // 2. Initialiser les dépendances requises par l'AgentContext
-            let manager = CollectionsManager::new(&ctx.storage, &ctx.active_domain, &ctx.active_db);
-
-            // 🎯 FIX DU GATEKEEPER : On passe le moteur natif chargé par le Kernel !
-            // (⚠️ Note : Adaptez `llm_native` si le champ porte un autre nom dans votre RaiseKernelState)
-            let native_engine = ctx.kernel.native_llm.clone();
-
-            let llm = LlmClient::new(&manager, ctx.storage.clone(), native_engine).await?;
-
-            // Instanciation du moteur Neuro-Symbolique
-            let world_engine =
-                raise_core::ai::world_model::NeuroSymbolicEngine::bootstrap(&manager).await?;
-            let world_engine_ref = SharedRef::new(world_engine);
-
-            // 3. Générer un identifiant de session CLI unique
-            let session_id = format!("cli_session_{}", ctx.active_user);
-
-            // 4. Préparer le contexte d'exécution
-            let agent_ctx = AgentContext::new(
-                "agent_software",
-                &session_id,
+            match raise_core::services::ai_service::ai_execute_and_ingest(
                 ctx.storage.clone(),
-                llm,
-                world_engine_ref,
-                raise_core::utils::data::config::AppConfig::get()
-                    .get_path("PATH_RAISE_DOMAIN")
-                    .unwrap_or_default(),
-                std::path::PathBuf::new(),
+                ctx.kernel.native_llm.clone(),
+                &ctx.active_domain,
+                &ctx.active_db,
+                &prompt_handle,
+                vars,
+                ingest,
             )
-            .await?;
+            .await
+            {
+                Ok((clean_json, ingested_ids)) => {
+                    if ingest {
+                        println!("📥 Routage ontologique et ingestion dans le Graphe Arcadia...");
+                        println!(
+                            "✅ {} entités validées et sauvegardées avec succès !",
+                            ingested_ids.len()
+                        );
+                    }
 
-            // 5. Invoquer le Software Agent spécialisé (L'Architecte Code)
-            let agent = SoftwareAgent::new(ctx.active_domain.clone(), ctx.active_db.clone());
-
-            // 6. Exécution de la mutation (RAG -> LLM -> Validation Schema -> Staging)
-            let result = agent.process(&agent_ctx, &intent).await?;
-
-            if let Some(res) = result {
-                user_success!(
-                    "AI_MUTATION_SUCCESS",
-                    json_value!({"message": res.message, "artifacts": res.artifacts.len()})
-                );
-            } else {
-                user_warn!(
-                    "AI_MUTATION_SKIPPED",
-                    json_value!({"reason": "L'agent n'a rien retourné."})
-                );
+                    match out {
+                        Some(p) => {
+                            let path = std::path::PathBuf::from(&p);
+                            raise_core::utils::io::fs::write_async(&path, clean_json).await?;
+                            user_success!("AI_EXECUTE_SUCCESS", json_value!({"out_file": p}));
+                            println!("✅ Artefact JSON brut sauvegardé dans : {}", p);
+                        }
+                        None => {
+                            if !ingest {
+                                println!("\n📦 --- RÉSULTAT DU BLUEPRINT ---");
+                                println!("{}", clean_json);
+                            }
+                            user_success!("AI_EXECUTE_SUCCESS", json_value!({}));
+                        }
+                    }
+                }
+                Err(e) => raise_error!("ERR_AI_EXECUTION_FAILED", error = e.to_string()),
             }
         }
 
         AiCommands::Commit { handle } => {
             user_info!("AI_COMMIT_START", json_value!({"target": handle}));
 
-            // Appel direct au service métier Zéro Dette qui gère la transaction complète
             match raise_core::services::codegen_service::commit_module(
                 &handle,
                 &ctx.active_domain,
@@ -509,58 +517,119 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
                 ),
             }
         }
-
-        _ => unreachable!(),
     }
 
     Ok(())
 }
 
-async fn run_interactive_mode(
-    ctx: &AgentContext,
-    cli_ctx: &CliContext,
-    client: LlmClient,
-) -> RaiseResult<()> {
+// =========================================================================
+// 🎯 BOUCLES INTERACTIVES MISES À JOUR
+// =========================================================================
+
+async fn run_interactive_mode(cli_ctx: &CliContext) -> RaiseResult<()> {
     user_info!("AI_INTERACTIVE_WELCOME", json_value!({}));
-    user_info!("AI_INTERACTIVE_SEPARATOR", json_value!({}));
     user_info!("AI_LLM_CONNECTED", json_value!({"mode": "local"}));
-    user_info!(
-        "AI_STORAGE_PATH",
-        json_value!({ "path": ctx.paths.domain_root })
-    );
-    user_info!("AI_EXIT_HINT", json_value!({}));
     let prompt = format!(
         "RAISE-AI [{}@{}/{}]> ",
         cli_ctx.active_user, cli_ctx.active_domain, cli_ctx.active_db
     );
+
     loop {
         print!("{}", prompt);
         os::flush_stdout()?;
         let input = os::read_stdin_line()?;
 
         if input.eq_ignore_ascii_case("exit") {
-            user_info!("AI_GOODBYE", json_value!({}));
             break;
         }
         if input.is_empty() {
             continue;
         }
 
-        process_input(ctx, &input, client.clone(), true).await;
+        match raise_core::services::ai_service::ai_classify_and_execute(
+            cli_ctx.storage.clone(),
+            cli_ctx.kernel.native_llm.clone(),
+            &cli_ctx.active_domain,
+            &cli_ctx.active_db,
+            &cli_ctx.active_user,
+            &input,
+            true,
+        )
+        .await
+        {
+            Ok((intent, agent_urn, agent_result)) => {
+                display_agent_result(&intent, &agent_urn, agent_result)
+            }
+            Err(e) => user_error!("AI_EXECUTION_ERROR", json_value!({"error": e.to_string()})),
+        }
+    }
+    Ok(())
+}
+
+async fn run_voice_mode(cli_ctx: &CliContext, manager: &CollectionsManager<'_>) -> RaiseResult<()> {
+    user_info!("AI_VOICE_INIT", json_value!({"status": "loading"}));
+    println!("⏳ Chargement du modèle vocal Whisper (Hors-ligne)...");
+
+    let mut engine = WhisperEngine::new(manager).await?;
+    let (_listener, mut rx) = AudioListener::start()?;
+
+    user_success!(
+        "AI_VOICE_READY",
+        json_value!({"message": "Microphone activé."})
+    );
+    println!("--------------------------------------------------\n🎤 Le micro est ouvert. Parlez naturellement !\n--------------------------------------------------\n");
+
+    while let Some(audio_chunk) = rx.recv().await {
+        print!("⏳ Transcription en cours... ");
+        let _ = os::flush_stdout();
+
+        match engine.transcribe(&audio_chunk) {
+            Ok(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                println!("\r🗣️  Vous : {}                    ", text);
+
+                match raise_core::services::ai_service::ai_classify_and_execute(
+                    cli_ctx.storage.clone(),
+                    cli_ctx.kernel.native_llm.clone(),
+                    &cli_ctx.active_domain,
+                    &cli_ctx.active_db,
+                    &cli_ctx.active_user,
+                    text,
+                    true,
+                )
+                .await
+                {
+                    Ok((intent, agent_urn, agent_result)) => {
+                        display_agent_result(&intent, &agent_urn, agent_result)
+                    }
+                    Err(e) => {
+                        user_error!("AI_EXECUTION_ERROR", json_value!({"error": e.to_string()}))
+                    }
+                }
+                println!("\n🎤 Écoute en cours...");
+            }
+            Err(e) => println!(
+                "\r❌ Erreur de transcription : {}               \n\n🎤 Écoute en cours...",
+                e
+            ),
+        }
     }
     Ok(())
 }
 
 async fn run_rag_action(
-    domain_path: PathBuf,
-    manager: &raise_core::json_db::collections::manager::CollectionsManager<'_>,
+    domain_path: std::path::PathBuf,
+    manager: &CollectionsManager<'_>,
     action: RagAction,
 ) -> RaiseResult<()> {
     let mut rag_engine = RagRetriever::new_internal(domain_path, manager).await?;
 
     match action {
         RagAction::Ingest { path } => {
-            let target_path = PathBuf::from(&path);
+            let target_path = std::path::PathBuf::from(&path);
             user_info!("RAG_INGESTION_START", json_value!({"path": path}));
 
             if !target_path.exists() {
@@ -571,7 +640,7 @@ async fn run_rag_action(
                 );
             }
 
-            let content = fs::read_to_string_async(&target_path).await?;
+            let content = raise_core::utils::io::fs::read_to_string_async(&target_path).await?;
             let source_name = target_path
                 .file_name()
                 .unwrap_or_default()
@@ -625,253 +694,15 @@ async fn run_rag_action(
     Ok(())
 }
 
-async fn run_voice_mode(
-    ctx: &AgentContext,
-    client: LlmClient,
-    manager: &raise_core::json_db::collections::manager::CollectionsManager<'_>,
-) -> RaiseResult<()> {
-    user_info!("AI_VOICE_INIT", json_value!({"status": "loading"}));
-    println!("⏳ Chargement du modèle vocal Whisper (Hors-ligne)...");
+// =========================================================================
+// TESTS UNITAIRES
+// =========================================================================
 
-    let mut engine = WhisperEngine::new(manager).await?;
-    let (_listener, mut rx) = AudioListener::start()?;
-
-    user_success!(
-        "AI_VOICE_READY",
-        json_value!({"message": "Microphone activé."})
-    );
-
-    println!("--------------------------------------------------");
-    println!("🎤 Le micro est ouvert. Parlez naturellement !");
-    println!("   (Appuyez sur Ctrl+C pour quitter)");
-    println!("--------------------------------------------------\n");
-
-    while let Some(audio_chunk) = rx.recv().await {
-        print!("⏳ Transcription en cours... ");
-        let _ = os::flush_stdout();
-
-        match engine.transcribe(&audio_chunk) {
-            Ok(text) => {
-                let text = text.trim();
-                if text.is_empty() {
-                    println!("\r🎤 Écoute en cours...               ");
-                    continue;
-                }
-
-                println!("\r🗣️  Vous : {}                    ", text);
-                user_info!("AI_VOICE_HEARD", json_value!({"text": text}));
-
-                process_input(ctx, text, client.clone(), true).await;
-
-                println!("\n🎤 Écoute en cours...");
-            }
-            Err(e) => {
-                user_error!("AI_VOICE_ERROR", json_value!({"error": e.to_string()}));
-                println!("\r❌ Erreur de transcription : {}               ", e);
-                println!("\n🎤 Écoute en cours...");
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn process_input(ctx: &AgentContext, input: &str, client: LlmClient, execute: bool) {
-    let classifier = IntentClassifier::new(client);
-    user_info!("AI_ANALYZING", json_value!({"input_length": input.len()}));
-
-    let intent = classifier.classify(input).await;
-    let target_agent_urn = intent.recommended_agent_id();
-
-    user_info!(
-        "AI_AGENT_START",
-        json_value!({ "agent": target_agent_urn, "intent": format!("{:?}", intent) })
-    );
-
-    let agent = DynamicAgent::new(target_agent_urn);
-    run_agent(agent, ctx, &intent, execute).await;
-}
-
-async fn run_agent<A: Agent>(
-    agent: A,
-    ctx: &AgentContext,
-    intent: &EngineeringIntent,
-    execute: bool,
-) {
-    if !execute {
-        user_info!("AI_SIMULATION_MODE", json_value!({}));
-        return;
-    }
-
-    // 🎯 Le CLI ne fait plus aucun traitement : il passe les plats au noyau certifié
-    match raise_core::ai::assurance::execute_certified(&agent, ctx, intent).await {
-        Ok(Some(res)) => {
-            user_success!("AI_RESULT", json_value!({ "message": res.message }));
-            for a in res.artifacts {
-                user_info!("AI_ARTIFACT_GENERATED", json_value!({ "path": a.path }));
-            }
-        }
-        Ok(None) => user_info!("AI_NO_ACTION", json_value!({})),
-        Err(e) => user_error!("AI_AGENT_ERROR", json_value!({ "error": e.to_string() })),
-    }
-}
-
-async fn run_gnn_validation(domain_path: &Path, uri_a: &str, uri_b: &str) -> RaiseResult<()> {
-    let root_path_str = domain_path.to_string_lossy().to_string();
-
-    let result = validate_arcadia_gnn(&root_path_str, uri_a, uri_b).await?;
-
-    let metrics = &result["metrics"];
-    let sim_initial = metrics["nlp_similarity"].as_f64().unwrap_or(0.0);
-    let sim_final = metrics["gnn_similarity"].as_f64().unwrap_or(0.0);
-    let delta = metrics["improvement"].as_f64().unwrap_or(0.0);
-    let confirmed = result["hypothesis_confirmed"].as_bool().unwrap_or(false);
-
-    println!("\n📊 --- RÉSULTAT DE L'EXPÉRIENCE GNN ---");
-    println!("Composant A : {}", uri_a);
-    println!("Composant B : {}", uri_b);
-    println!("Similarité Sémantique (NLP pur) : {:.4}", sim_initial);
-    println!("Similarité Structurelle (GNN)   : {:.4}", sim_final);
-
-    if confirmed {
-        user_success!(
-            "✅ [MBSE] Hypothèse confirmée",
-            json_value!({"improvement_pct": delta * 100.0})
-        );
-        println!(
-            "Conclusion : La topologie du système renforce le lien entre ces composants (+{:.2}%).",
-            delta * 100.0
-        );
-    } else {
-        user_warn!(
-            "⚠️ [MBSE] Hypothèse rejetée",
-            json_value!({"improvement_pct": delta * 100.0})
-        );
-        println!("Conclusion : La structure globale ne justifie pas une allocation forte entre ces composants.");
-    }
-
-    Ok(())
-}
-
-async fn inspect_agent_logic(
-    ctx: &AgentContext,
-    reference: &str,
-    space: &str,
-    db: &str,
-) -> RaiseResult<()> {
-    user_info!(
-        "AI_INSPECT_START",
-        json_value!({
-            "target": reference,
-            "space": space,
-            "db": db
-        })
-    );
-
-    let agent_doc = query_knowledge_graph(ctx, reference, false).await?;
-
-    if let Some(prompt_id) = agent_doc["neuro_profile"]["prompt_id"].as_str() {
-        let prompt_doc = query_knowledge_graph(ctx, prompt_id, false).await?;
-
-        let directives_len = prompt_doc["directives"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
-
-        user_success!(
-            "AI_PROMPT_RESOLVED",
-            json_value!({
-                "persona": prompt_doc["identity"]["persona"],
-                "directives_count": directives_len
-            })
-        );
-
-        println!("\n📝 --- INSTRUCTIONS RÉCUPÉRÉES ---");
-        println!("Identité : {}", prompt_doc["identity"]["persona"]);
-        if let Some(directives) = prompt_doc["directives"].as_array() {
-            for (i, d) in directives.iter().enumerate() {
-                println!("  {}. {}", i + 1, d.as_str().unwrap_or(""));
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn run_execute_action(
-    ctx: &CliContext,
-    client: LlmClient,
-    prompt_handle: &str,
-    vars_json: Option<String>,
-    out_path: Option<String>,
-    ingest: bool,
-) -> RaiseResult<()> {
-    user_info!("AI_EXECUTE_START", json_value!({"prompt": prompt_handle}));
-
-    let vars: Option<JsonValue> = if let Some(s) = vars_json {
-        Some(json::deserialize_from_str(&s)?)
-    } else {
-        None
-    };
-
-    let prompt_engine = PromptEngine::new(ctx.storage.clone(), &ctx.active_domain, &ctx.active_db);
-
-    user_info!(
-        "AI_PROMPT_COMPILING",
-        json_value!({"handle": prompt_handle})
-    );
-    let system_prompt = prompt_engine.compile(prompt_handle, vars.as_ref()).await?;
-
-    println!("🤖 Inférence RAISE en cours ({})...", prompt_handle);
-    let response = client
-        .ask(
-            raise_core::ai::llm::client::LlmBackend::LocalLlama,
-            &system_prompt,
-            "",
-            Clearance::Internal,
-        )
-        .await?;
-
-    let clean_json = extract_json_from_llm(&response);
-
-    if ingest {
-        println!("📥 Routage ontologique et ingestion dans le Graphe Arcadia...");
-        let ids = ingest_arcadia_elements(
-            &ctx.storage,
-            &ctx.active_domain,
-            &ctx.active_db,
-            &clean_json,
-        )
-        .await?;
-        println!(
-            "✅ {} entités validées et sauvegardées avec succès !",
-            ids.len()
-        );
-    }
-
-    match out_path {
-        Some(p) => {
-            let path = PathBuf::from(&p);
-            fs::write_async(&path, clean_json).await?;
-            user_success!("AI_EXECUTE_SUCCESS", json_value!({"out_file": p}));
-            println!("✅ Artefact JSON brut sauvegardé dans : {}", p);
-        }
-        None => {
-            if !ingest {
-                println!("\n📦 --- RÉSULTAT DU BLUEPRINT ---");
-                println!("{}", clean_json);
-            }
-            user_success!("AI_EXECUTE_SUCCESS", json_value!({}));
-        }
-    }
-
-    Ok(())
-}
-
-// --- TESTS UNITAIRES ---
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    use raise_core::utils::data::config::AppConfig;
     use raise_core::utils::testing::*;
 
     #[derive(Parser)]
@@ -1077,7 +908,11 @@ mod tests {
 
         // 🎯 L'exécution doit renvoyer l'erreur ERR_AI_OFFLINE de manière structurée
         match handle(args, ctx).await {
-            Err(AppError::Structured(err)) if err.code == "ERR_AI_OFFLINE" => Ok(()),
+            Err(raise_core::utils::core::error::AppError::Structured(err))
+                if err.code == "ERR_AI_OFFLINE" =>
+            {
+                Ok(())
+            }
             _ => raise_error!(
                 "ERR_TEST_ASSERTION_FAILED",
                 error = "Le handler aurait dû rejeter l'appel car l'orchestrateur est absent."

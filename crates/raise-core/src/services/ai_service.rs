@@ -19,11 +19,20 @@ use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::storage::{JsonDbConfig, StorageEngine};
 
 // 🎯 IMPORT POUR L'EXPORT DE DATASET
+use crate::ai::llm::client::{LlmBackend, LlmClient, LlmEngine};
 use crate::ai::training::dataset::{extract_domain_data, TrainingExample};
 
+use crate::ai::agents::dynamic_agent::DynamicAgent;
+use crate::ai::agents::intent_classifier::EngineeringIntent;
+use crate::ai::agents::intent_classifier::IntentClassifier;
 use crate::ai::agents::prompt_engine::PromptEngine;
+use crate::ai::agents::software_agent::SoftwareAgent;
 use crate::ai::agents::tools::extract_json_from_llm;
-use crate::ai::llm::client::{LlmBackend, LlmClient, LlmEngine};
+use crate::ai::agents::{Agent, AgentContext};
+use crate::ai::assurance::{persistence::save_quality_report, QualityReport};
+use crate::ai::world_model::NeuroSymbolicEngine;
+
+use crate::utils::data::config::AppConfig;
 use crate::utils::data::json::Clearance;
 
 /// 🎯 LOGIQUE CORE : Exécute un blueprint de prompt (Data-Driven).
@@ -63,6 +72,40 @@ pub async fn ai_execute_blueprint_core(
 
     // 4. Nettoyage JSON
     Ok(extract_json_from_llm(&response))
+}
+
+/// 🚀 Orchestre l'exécution d'un blueprint et son ingestion optionnelle dans Arcadia.
+/// Pur service métier : aucune dépendance aux I/O du CLI (println, fichiers locaux).
+pub async fn ai_execute_and_ingest(
+    storage: SharedRef<StorageEngine>,
+    native_llm: Option<SharedRef<AsyncMutex<dyn LlmEngine>>>,
+    domain: &str,
+    db: &str,
+    prompt_handle: &str,
+    vars_json: Option<String>,
+    ingest: bool,
+) -> RaiseResult<(String, Vec<String>)> {
+    // 1. Parsing des variables d'injection
+    let vars: Option<JsonValue> = if let Some(s) = vars_json {
+        Some(crate::utils::data::json::deserialize_from_str(&s)?)
+    } else {
+        None
+    };
+
+    // 2. Exécution du Blueprint (Data-Driven)
+    let clean_json =
+        ai_execute_blueprint_core(storage.clone(), native_llm, domain, db, prompt_handle, vars)
+            .await?;
+
+    // 3. Routage et ingestion optionnelle dans le Knowledge Graph
+    let ingested_ids = if ingest {
+        crate::services::model_service::ingest_arcadia_elements(&storage, domain, db, &clean_json)
+            .await?
+    } else {
+        Vec::new()
+    };
+
+    Ok((clean_json, ingested_ids))
 }
 
 /// 🖥️ : Expose la logique blueprint (Façade pure).
@@ -212,9 +255,13 @@ pub async fn ai_chat(ai_state: &AiState, user_input: &str) -> RaiseResult<AgentR
     let guard = ai_state.0.lock().await;
 
     if let Some(shared_orch) = &*guard {
-        let mut orchestrator = shared_orch.lock().await;
+        // 🎯 CORRECTION : Utilisation du SquadRunner isolé sans verrouiller l'orchestrateur
+        let squad_runner = {
+            let orch = shared_orch.lock().await;
+            orch.squad_runner()
+        }; // Le verrou de l'orchestrateur est relâché ici
 
-        match orchestrator.execute_workflow(user_input).await {
+        match squad_runner.execute_workflow(user_input).await {
             Ok(res) => Ok(res),
             Err(e) => raise_error!("ERR_AI_WORKFLOW_EXECUTION", error = e.to_string()),
         }
@@ -341,6 +388,177 @@ pub async fn validate_arcadia_gnn(
     }))
 }
 
+/// 🧬 Exécute une mutation de code via le Software Agent
+pub async fn ai_mutate_component(
+    storage: SharedRef<StorageEngine>,
+    native_llm: Option<SharedRef<AsyncMutex<dyn LlmEngine>>>,
+    domain: &str,
+    db: &str,
+    user: &str,
+    handle: &str,
+    prompt: &str,
+) -> RaiseResult<Option<AgentResult>> {
+    let intent = EngineeringIntent::MutateCode {
+        module_name: "auto".to_string(),
+        target_handle: handle.to_string(),
+        instruction: prompt.to_string(),
+    };
+
+    let manager = CollectionsManager::new(storage.as_ref(), domain, db);
+    let llm = LlmClient::new(&manager, storage.clone(), native_llm).await?;
+
+    let world_engine = NeuroSymbolicEngine::bootstrap(&manager).await?;
+    let world_engine_ref = SharedRef::new(world_engine);
+
+    let session_id = format!("cli_session_{}", user);
+    let domain_path = AppConfig::get()
+        .get_path("PATH_RAISE_DOMAIN")
+        .unwrap_or_default();
+
+    let agent_ctx = AgentContext::new(
+        "agent_software",
+        &session_id,
+        storage,
+        llm,
+        world_engine_ref,
+        domain_path,
+        std::path::PathBuf::new(),
+    )
+    .await?;
+
+    let agent = SoftwareAgent::new(domain.to_string(), db.to_string());
+    agent.process(&agent_ctx, &intent).await
+}
+
+/// 📋 Génère et persiste un rapport d'audit qualité
+pub async fn ai_run_audit(
+    storage: SharedRef<StorageEngine>,
+    sys_domain: &str,
+    sys_db: &str,
+    target_domain: &str,
+    target_db: &str,
+) -> RaiseResult<String> {
+    let sys_manager = CollectionsManager::new(storage.as_ref(), sys_domain, sys_db);
+    let report = QualityReport::new(target_domain, target_db);
+    save_quality_report(&sys_manager, &report).await
+}
+
+/// 🧠 Processus complet de classification et d'exécution d'une intention (NLP -> Agent -> Action)
+/// Totalement découplé de l'interface utilisateur.
+pub async fn ai_classify_and_execute(
+    storage: SharedRef<StorageEngine>,
+    native_llm: Option<SharedRef<AsyncMutex<dyn LlmEngine>>>,
+    domain: &str,
+    db: &str,
+    user: &str,
+    input: &str,
+    execute: bool,
+) -> RaiseResult<(EngineeringIntent, String, Option<AgentResult>)> {
+    let manager = CollectionsManager::new(storage.as_ref(), domain, db);
+    let llm = LlmClient::new(&manager, storage.clone(), native_llm).await?;
+
+    // 1. Classification de l'intention
+    let classifier = IntentClassifier::new(llm.clone());
+    let intent = classifier.classify(input).await;
+    let target_agent_urn = intent.recommended_agent_id().to_string();
+
+    if !execute {
+        return Ok((intent, target_agent_urn, None));
+    }
+
+    // 2. Initialisation du contexte d'exécution
+    let world_engine = NeuroSymbolicEngine::bootstrap(&manager).await?;
+    let world_engine_ref = SharedRef::new(world_engine);
+
+    let session_id = format!("cli_session_{}", user);
+    let domain_path = AppConfig::get()
+        .get_path("PATH_RAISE_DOMAIN")
+        .unwrap_or_default();
+
+    let dataset_path = AppConfig::get()
+        .get_path("PATH_RAISE_DATASET")
+        .unwrap_or_else(|| domain_path.join("dataset"));
+
+    let agent_ctx = AgentContext::new(
+        &target_agent_urn,
+        &session_id,
+        storage,
+        llm,
+        world_engine_ref,
+        domain_path,
+        dataset_path,
+    )
+    .await?;
+
+    // 3. Exécution Certifiée de l'agent
+    let agent = DynamicAgent::new(&target_agent_urn);
+    let agent_result = crate::ai::assurance::execute_certified(&agent, &agent_ctx, &intent).await?;
+
+    Ok((intent, target_agent_urn, agent_result))
+}
+
+/// 🔍 Inspection stricte et sécurisée d'un profil agent et de son prompt (Fail-Fast)
+pub async fn ai_inspect_agent(
+    storage: SharedRef<StorageEngine>,
+    domain: &str,
+    db: &str,
+    reference: &str,
+) -> RaiseResult<JsonValue> {
+    let manager = CollectionsManager::new(storage.as_ref(), domain, db);
+
+    let agent_doc = match manager.get_document("agents", reference).await {
+        Ok(Some(doc)) => doc,
+        _ => raise_error!(
+            "ERR_INSPECT_AGENT_NOT_FOUND",
+            context = json_value!({"reference": reference})
+        ),
+    };
+
+    let prompt_id = match agent_doc
+        .get("neuro_profile")
+        .and_then(|np| np.get("prompt_id"))
+        .and_then(|id| id.as_str())
+    {
+        Some(id) => id,
+        None => raise_error!(
+            "ERR_INSPECT_NO_PROMPT",
+            error = "Le profil de l'agent ne contient aucun prompt_id"
+        ),
+    };
+
+    let prompt_doc = match manager.get_document("prompts", prompt_id).await {
+        Ok(Some(doc)) => doc,
+        _ => raise_error!(
+            "ERR_INSPECT_PROMPT_NOT_FOUND",
+            context = json_value!({"prompt_id": prompt_id})
+        ),
+    };
+
+    let persona = match prompt_doc
+        .get("identity")
+        .and_then(|id| id.get("persona"))
+        .and_then(|p| p.as_str())
+    {
+        Some(p) => p.to_string(),
+        None => raise_error!(
+            "ERR_INSPECT_INVALID_SCHEMA",
+            error = "Champ identity.persona manquant."
+        ),
+    };
+
+    let directives = match prompt_doc.get("directives").and_then(|d| d.as_array()) {
+        Some(d) => d.clone(),
+        None => raise_error!(
+            "ERR_INSPECT_INVALID_SCHEMA",
+            error = "Tableau directives manquant."
+        ),
+    };
+
+    Ok(json_value!({
+        "persona": persona,
+        "directives": directives
+    }))
+}
 // =========================================================================
 // TESTS UNITAIRES
 // =========================================================================

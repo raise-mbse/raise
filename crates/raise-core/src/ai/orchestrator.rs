@@ -19,6 +19,95 @@ use crate::utils::prelude::*;
 use crate::ai::agents::intent_classifier::IntentClassifier;
 use crate::ai::agents::{dynamic_agent::DynamicAgent, Agent, AgentContext, AgentResult};
 
+// 🎯 NOUVEAU : Le Runner autonome qui exécute la boucle ACL sans bloquer l'Orchestrateur
+#[derive(Clone)]
+pub struct SquadRunner {
+    pub llm_remote: LlmClient,
+    pub world_engine: SharedRef<NeuroSymbolicEngine>,
+    pub storage: SharedRef<StorageEngine>,
+}
+
+impl SquadRunner {
+    pub async fn execute_workflow(&self, user_query: &str) -> RaiseResult<AgentResult> {
+        let app_config = AppConfig::get();
+        let storage_arc = self.storage.clone();
+
+        let _manager = CollectionsManager::new(
+            storage_arc.as_ref(),
+            &app_config.mount_points.system.domain,
+            &app_config.mount_points.system.db,
+        );
+
+        let classifier = IntentClassifier::new(self.llm_remote.clone());
+        let mut current_intent = classifier.classify(user_query).await;
+        let mut current_agent_urn = current_intent.recommended_agent_id().to_string();
+
+        let session_scope = current_intent.default_session_scope();
+        let global_session_id =
+            AgentContext::generate_default_session_id("orchestrator", session_scope)?;
+
+        let domain_path = match app_config.get_path("PATH_RAISE_DOMAIN") {
+            Some(p) => p,
+            None => raise_error!(
+                "ERR_CONFIG_PATH_MISSING",
+                error = "PATH_RAISE_DOMAIN non défini"
+            ),
+        };
+        let dataset_path = app_config
+            .get_path("PATH_RAISE_DATASET")
+            .unwrap_or_else(|| domain_path.join("dataset"));
+
+        let mut hop_count = 0;
+        const MAX_HOPS: i32 = 5;
+        let mut accumulated_artifacts = Vec::new();
+        let mut accumulated_messages = Vec::new();
+
+        loop {
+            if hop_count >= MAX_HOPS {
+                accumulated_messages
+                    .push("⚠️ Limite de redirections entre agents atteinte.".to_string());
+                break;
+            }
+
+            let ctx = AgentContext::new(
+                &current_agent_urn,
+                &global_session_id,
+                storage_arc.clone(),
+                self.llm_remote.clone(),
+                self.world_engine.clone(),
+                domain_path.clone(),
+                dataset_path.clone(),
+            )
+            .await?;
+
+            let agent = DynamicAgent::new(&current_agent_urn);
+            match agent.process(&ctx, &current_intent).await? {
+                Some(res) => {
+                    accumulated_artifacts.extend(res.artifacts);
+                    accumulated_messages.push(res.message);
+
+                    if let Some(acl_msg) = res.outgoing_message {
+                        current_agent_urn = acl_msg.receiver.clone();
+                        current_intent = classifier.classify(&acl_msg.content).await;
+                        hop_count += 1;
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        Ok(AgentResult {
+            message: accumulated_messages.join("\n\n---\n\n"),
+            artifacts: accumulated_artifacts,
+            outgoing_message: None,
+            xai_frame: None,
+        })
+    }
+}
+
 /// Chef d'orchestre du système IA RAISE.
 /// Gère le cycle de vie hybride : RAG sémantique, Inférence LLM et World Model Neuro-Symbolique.
 pub struct AiOrchestrator {
@@ -53,19 +142,21 @@ impl AiOrchestrator {
         // 3. World Model (Neuro-Symbolique) avec AUTO-HEALING (Zéro Dette)
         let world_engine = match NeuroSymbolicEngine::bootstrap(manager).await {
             Ok(engine) => {
-                // 🎯 AUTO-HEALING : Si l'ancien cerveau était dimensionné à 16,
-                // il est obsolète face à notre nouvel HybridEncoder (32). On le recrée.
+                // 🎯 FAIL-FAST (Zéro Dette) : On refuse catégoriquement de démarrer
                 if engine.config.embedding_dim != 32 {
-                    crate::user_warn!(
-                        "WRN_OBSOLETE_BRAIN",
-                        json_value!({"msg": "Ancien modèle détecté. Recréation en 32 dimensions pour supporter le NLP."})
-                    );
-                    let mut cfg = engine.config.clone();
-                    cfg.embedding_dim = 32;
-                    NeuroSymbolicEngine::new_empty(cfg)?
-                } else {
-                    engine
+                    crate::raise_error!(
+                        "ERR_OBSOLETE_BRAIN",
+                        error = format!(
+                            "Incohérence dimensionnelle fatale : {} détectée, 32 attendue.",
+                            engine.config.embedding_dim
+                        ),
+                        context = json_value!({
+                            "action": "HALT",
+                            "hint": "L'auto-guérison est désactivée. Vous devez purger manuellement l'ancienne configuration dans 'service_configs' et supprimer le fichier 'world_model.safetensors'."
+                        })
+                    )
                 }
+                engine // Retourner l'engine si la dimension est correcte
             }
             Err(e) => {
                 crate::user_warn!(
@@ -150,85 +241,13 @@ impl AiOrchestrator {
         })
     }
 
-    /// Exécute un workflow multi-agents complet avec routage d'intention.
-    pub async fn execute_workflow(&mut self, user_query: &str) -> RaiseResult<AgentResult> {
-        let app_config = AppConfig::get();
-        let storage_arc = self.storage.clone();
-
-        // Utilisation des Mount Points pour reconstruire le manager technique
-        let _manager = CollectionsManager::new(
-            storage_arc.as_ref(),
-            &app_config.mount_points.system.domain,
-            &app_config.mount_points.system.db,
-        );
-
-        let classifier = IntentClassifier::new(self.llm_remote.clone());
-        let mut current_intent = classifier.classify(user_query).await;
-        let mut current_agent_urn = current_intent.recommended_agent_id().to_string();
-
-        let session_scope = current_intent.default_session_scope();
-        let global_session_id =
-            AgentContext::generate_default_session_id("orchestrator", session_scope)?;
-
-        let domain_path = match app_config.get_path("PATH_RAISE_DOMAIN") {
-            Some(p) => p,
-            None => raise_error!(
-                "ERR_CONFIG_PATH_MISSING",
-                error = "PATH_RAISE_DOMAIN non défini"
-            ),
-        };
-        let dataset_path = app_config
-            .get_path("PATH_RAISE_DATASET")
-            .unwrap_or_else(|| domain_path.join("dataset"));
-
-        let mut hop_count = 0;
-        const MAX_HOPS: i32 = 5;
-        let mut accumulated_artifacts = Vec::new();
-        let mut accumulated_messages = Vec::new();
-
-        loop {
-            if hop_count >= MAX_HOPS {
-                accumulated_messages
-                    .push("⚠️ Limite de redirections entre agents atteinte.".to_string());
-                break;
-            }
-
-            let ctx = AgentContext::new(
-                &current_agent_urn,
-                &global_session_id,
-                storage_arc.clone(),
-                self.llm_remote.clone(),
-                self.world_engine.clone(),
-                domain_path.clone(),
-                dataset_path.clone(),
-            )
-            .await?;
-
-            let agent = DynamicAgent::new(&current_agent_urn);
-            match agent.process(&ctx, &current_intent).await? {
-                Some(res) => {
-                    accumulated_artifacts.extend(res.artifacts);
-                    accumulated_messages.push(res.message);
-
-                    if let Some(acl_msg) = res.outgoing_message {
-                        current_agent_urn = acl_msg.receiver.clone();
-                        current_intent = classifier.classify(&acl_msg.content).await;
-                        hop_count += 1;
-                        continue;
-                    } else {
-                        break;
-                    }
-                }
-                None => break,
-            }
+    ///  Fournit une instance isolée pour les Handlers
+    pub fn squad_runner(&self) -> SquadRunner {
+        SquadRunner {
+            llm_remote: self.llm_remote.clone(),
+            world_engine: self.world_engine.clone(),
+            storage: self.storage.clone(),
         }
-
-        Ok(AgentResult {
-            message: accumulated_messages.join("\n\n---\n\n"),
-            artifacts: accumulated_artifacts,
-            outgoing_message: None,
-            xai_frame: None,
-        })
     }
 
     /// Interface "Ask" optimisée : Priorité au Local (VRAM partagée) -> Fallback Cloud.

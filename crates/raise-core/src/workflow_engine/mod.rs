@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/workflow_engine/mod.rs
+// FICHIER : crates/raise-core/src/workflow_engine/mod.rs
 
 pub mod compiler;
 pub mod critic;
@@ -24,51 +24,61 @@ pub use state_machine::WorkflowStateMachine;
 #[derive(Debug, Clone, Serializable, Deserializable, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeType {
-    Task,        // Tâche standard (Phase ou action déléguée à une Squad IA)
-    Decision,    // Branchement conditionnel (Condorcet ou Rule Engine)
-    Parallel,    // Exécution simultanée de plusieurs tâches/agents
-    GateHitl,    // Validation humaine (Human In The Loop) pour approuver une phase
-    QualityGate, // (Ex-GatePolicy) Vérification auto via les QualityRules (AST)
-
-    Genetics,   // Optimisation topologique via Algorithmes Génétiques (CPU/Rayon)
-    WorldModel, // Simulation d'impact via GNN et Native Engine (CPU/GPU)
-
-    CallMcp,    // Appel outil externe direct (Model Context Protocol)
-    Wasm,       // Exécution d'un module WebAssembly
-    Milestone,  // Jalon bloquant marquant la fin d'une phase majeure
-    SubProject, // Appel à un autre workflow (Sous-graphe)
-    End,        // Fin du flux
+    Task,
+    Decision,
+    Parallel,
+    GateHitl,
+    #[serde(alias = "gate_policy")] // 🎯 ALIGNEMENT SCHEMA : Tolérance de désérialisation
+    QualityGate,
+    Genetics,
+    WorldModel,
+    CallMcp,
+    Wasm,
+    Milestone,
+    SubProject,
+    #[serde(alias = "store_memory")] // 🎯 SCHEMA MAPPING
+    StoreMemory,
+    #[serde(alias = "emit_event")] // 🎯 SCHEMA MAPPING
+    EmitEvent,
+    End,
 }
 
 /// Statut d'exécution d'une instance ou d'un nœud
 #[derive(Debug, Clone, Copy, Serializable, Deserializable, PartialEq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")] // 🎯 ALIGNEMENT SCHEMA : lowercase strict (pending, running...)
 pub enum ExecutionStatus {
-    Pending,   // En attente
-    Running,   // En cours d'exécution par la Squad
-    Completed, // Terminé avec succès (Validé par QA/HITL)
-    Failed,    // Erreur technique ou rejet qualité
-    Paused,    // En attente d'action humaine (HITL)
-    Skipped,   // Branche non prise
-    Blocked,   // NOUVEAU: Bloqué en attente d'une dépendance externe
-    InReview,  // NOUVEAU: En cours d'audit (Critic/QualityGate)
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Paused,
+    Skipped,
+    Aborted, // 🎯 NOUVEAU (Issu du workflow_instance.schema.json)
+    Blocked,
+    InReview,
 }
 
 /// Nœud unitaire du workflow (Le Graphe)
 #[derive(Debug, Clone, Serializable, Deserializable)]
 pub struct WorkflowNode {
+    #[serde(rename = "node_id")] // 🎯 ALIGNEMENT SCHEMA
     pub id: String,
     pub r#type: NodeType,
     pub name: String,
-    pub params: JsonValue, // Contient dynamiquement les directives de la tâche
+    pub params: JsonValue,
 }
 
 /// Lien orienté entre deux nœuds
 #[derive(Debug, Clone, Serializable, Deserializable)]
 pub struct WorkflowEdge {
+    #[serde(rename = "from_node_id")] // 🎯 ALIGNEMENT SCHEMA
     pub from: String,
+    #[serde(rename = "to_node_id")] // 🎯 ALIGNEMENT SCHEMA
     pub to: String,
-    pub condition: Option<String>, // Expression AST pour le Rules Engine
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>, // 🎯 NOUVEAU : Type de com (U2C, C2A, A2A)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
 }
 
 /// Définition statique du Workflow (Le "Template" ou "Plan" compilé)
@@ -79,20 +89,26 @@ pub struct WorkflowDefinition {
     pub handle: String,
     pub nodes: Vec<WorkflowNode>,
     pub edges: Vec<WorkflowEdge>,
-    pub entry: String, // ID du nœud de départ
+    #[serde(rename = "entry_node_id")] // 🎯 ALIGNEMENT SCHEMA
+    pub entry: String,
 }
 
 /// Instance dynamique (L'Exécution en cours - Jumeau Numérique)
-/// Aligné sur workflow-instance.schema.json
 #[derive(Debug, Clone, Serializable, Deserializable)]
-#[serde(rename_all = "camelCase")]
+// 🎯 SUPPRESSION DU camelCase GLOBAL : Le schéma exige du snake_case strict
 pub struct WorkflowInstance {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     pub _id: Option<String>,
-    pub handle: String,      // Slug unique
-    pub workflow_id: String, // ID du WorkflowDefinition
-    pub mission_id: String,  // UUID de la mission métier
+    pub handle: String,
+
+    #[serde(rename = "workflow_template_id")] // 🎯 ALIGNEMENT SCHEMA
+    pub workflow_id: String,
+
+    pub mission_id: String,
     pub status: ExecutionStatus,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_node_id: Option<String>, // 🎯 NOUVEAU : Exigé par le schéma
 
     /// État de chaque nœud : NodeID -> Status
     pub node_states: UnorderedMap<String, ExecutionStatus>,
@@ -104,6 +120,7 @@ pub struct WorkflowInstance {
     pub xai_traces: Vec<String>,
 
     /// Journal d'audit détaillé
+    #[serde(rename = "execution_logs")] // 🎯 ALIGNEMENT SCHEMA
     pub logs: Vec<String>,
 
     pub created_at: i64,
@@ -123,6 +140,7 @@ impl WorkflowInstance {
             workflow_id: workflow_id.to_string(),
             mission_id: mission_id.to_string(),
             status: ExecutionStatus::Pending,
+            current_node_id: None, // Initialisation
             node_states: UnorderedMap::new(),
             context: initial_context,
             xai_traces: Vec::new(),
@@ -137,7 +155,7 @@ impl WorkflowInstance {
 }
 
 // =========================================================================
-// TESTS UNITAIRES
+// TESTS UNITAIRES (Corrigés pour s'aligner sur les nouveaux sérialiseurs)
 // =========================================================================
 
 #[cfg(test)]
@@ -146,7 +164,6 @@ mod tests {
 
     #[test]
     fn test_node_type_serialization() {
-        // Vérifie que les types sont bien sérialisés en snake_case pour JSON-DB
         let t1 = NodeType::GateHitl;
         let json_t1 = json::serialize_to_string(&t1).unwrap();
         assert_eq!(json_t1, "\"gate_hitl\"");
@@ -158,14 +175,14 @@ mod tests {
 
     #[test]
     fn test_execution_status_serialization() {
-        // Vérifie la sérialisation en SCREAMING_SNAKE_CASE
+        // 🎯 FIX TEST : Vérifie la sérialisation en snake_case
         let s1 = ExecutionStatus::InReview;
         let json_s1 = json::serialize_to_string(&s1).unwrap();
-        assert_eq!(json_s1, "\"IN_REVIEW\"");
+        assert_eq!(json_s1, "\"in_review\"");
 
         let s2 = ExecutionStatus::Paused;
         let json_s2 = json::serialize_to_string(&s2).unwrap();
-        assert_eq!(json_s2, "\"PAUSED\"");
+        assert_eq!(json_s2, "\"paused\"");
     }
 
     #[test]
@@ -183,16 +200,15 @@ mod tests {
         assert_eq!(instance.workflow_id, wf_id);
         assert_eq!(instance.mission_id, mission_id);
         assert_eq!(instance.status, ExecutionStatus::Pending);
+        assert!(instance.current_node_id.is_none());
 
-        // Vérifie que le contexte est bien injecté
         assert_eq!(
             instance.context.get("budget").unwrap().as_i64().unwrap(),
             5000
         );
 
-        // Les collections de traçabilité doivent être vides
         assert!(instance.xai_traces.is_empty());
         assert!(instance.node_states.is_empty());
-        assert_eq!(instance.logs.len(), 1); // 1 log de création
+        assert_eq!(instance.logs.len(), 1);
     }
 }

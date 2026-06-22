@@ -276,11 +276,13 @@ mod tests {
                 WorkflowEdge {
                     from: "start".into(),
                     to: "mid".into(),
+                    channel: None,
                     condition: None,
                 },
                 WorkflowEdge {
                     from: "mid".into(),
                     to: "end".into(),
+                    channel: None,
                     condition: None,
                 },
             ],
@@ -353,6 +355,7 @@ mod tests {
             edges: vec![WorkflowEdge {
                 from: "start".into(),
                 to: "path_a".into(),
+                channel: None,
                 condition: Some(r#"{"eq": [{"var": "status"}, {"val": "ok"}]}"#.into()),
             }],
         };
@@ -408,6 +411,7 @@ mod tests {
             edges: vec![WorkflowEdge {
                 from: "start".into(),
                 to: "path_ast".into(),
+                channel: None,
                 condition: Some(ast_condition),
             }],
         };

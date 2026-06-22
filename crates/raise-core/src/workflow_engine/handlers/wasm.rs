@@ -35,14 +35,20 @@ impl NodeHandler for WasmHandler {
             .await
         {
             Ok((exit_code, signals)) => {
-                // Injection des signaux dans le contexte du workflow
+                // 🎯 INJECTION SÉCURISÉE : Isolation absolue des variables tierces
+                let mut wasm_signals = match context.get("wasm_signals") {
+                    Some(JsonValue::Object(map)) => map.clone(),
+                    _ => JsonObject::new(),
+                };
+
                 for signal in signals {
                     user_info!(
                         "INF_WASM_SIGNAL",
-                        json_value!({ "plugin": plugin_id, "signal": signal })
+                        json_value!({ "plugin": plugin_id, "signal": &signal })
                     );
-                    context.insert(format!("{}_signal", plugin_id), signal);
+                    wasm_signals.insert(plugin_id.to_string(), signal);
                 }
+                context.insert("wasm_signals".to_string(), JsonValue::Object(wasm_signals));
 
                 if exit_code == 1 {
                     user_success!("SUC_WASM_COMPLETED", json_value!({ "plugin": plugin_id }));

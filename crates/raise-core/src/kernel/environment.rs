@@ -268,6 +268,7 @@ impl<'a> SystemBootstrapper<'a> {
 
     // @raise-handle: fn:db_path
     fn db_path(&self) -> RaiseResult<PathBuf> {
+        /*
         let root = match self.config.get_path("PATH_RAISE_DOMAIN") {
             Some(p) => p,
             None => raise_error!(
@@ -276,6 +277,11 @@ impl<'a> SystemBootstrapper<'a> {
             ),
         };
         Ok(root.join(&self.domain).join(&self.db))
+        */
+        // 🎯 L'infrastructure physique est lue depuis le StorageEngine injecté.
+        // Mode Run  => pointera sur PATH_RAISE_DOMAIN via le StorageEngine de prod
+        // Mode Test => pointera sur /tmp via le StorageEngine de la DbSandbox
+        Ok(self.manager.storage.config.db_root(&self.domain, &self.db))
     }
 
     // @raise-handle: fn:extract_operation_documents

@@ -72,6 +72,7 @@ impl WorkflowScheduler {
             mission_id: mission_id.to_string(),
             workflow_id: def.handle.clone(),
             status: ExecutionStatus::Pending,
+            current_node_id: None,
             node_states: UnorderedMap::new(),
             context: UnorderedMap::new(),
             xai_traces: Vec::new(),
@@ -308,7 +309,7 @@ mod tests {
             .get_document("workflow_instances", &instance.handle)
             .await?
             .unwrap();
-        assert_eq!(doc["workflowId"], "wf_test");
+        assert_eq!(doc["workflow_template_id"], "wf_test");
         Ok(())
     }
 
@@ -339,6 +340,7 @@ mod tests {
             mission_id: "m1".into(),
             workflow_id: "ghost_wf".into(),
             status: ExecutionStatus::Pending,
+            current_node_id: None,
             node_states: UnorderedMap::new(),
             context: UnorderedMap::new(),
             xai_traces: Vec::new(),

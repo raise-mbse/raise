@@ -90,7 +90,7 @@ impl NodeHandler for DecisionHandler {
         let winner_idx = match wins
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(FmtOrdering::Equal))
         {
             Some((idx, _)) => idx,
             None => raise_error!("ERR_DECISION_COMPUTATION_FAILED"),

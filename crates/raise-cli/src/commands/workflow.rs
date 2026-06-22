@@ -201,15 +201,15 @@ pub async fn handle(args: WorkflowArgs, ctx: CliContext) -> RaiseResult<()> {
         }
 
         WorkflowCommands::SetSensor { value } => {
-            let manager = CollectionsManager::new(&ctx.storage, &ctx.active_domain, &ctx.active_db);
-            let sensor_doc = json_value!({
-                "_id": "vibration_z",
-                "value": value,
-                "updatedAt": UtcClock::now().to_rfc3339()
-            });
+            user_info!("SENSOR_UPDATE_START", json_value!({"value": value}));
 
-            manager.upsert_document("digital_twin", sensor_doc).await?;
-            user_success!("SENSOR_UPDATED", json_value!({"value": value}));
+            // 🎯 FIX : On délègue l'opération au service métier (Zero DB mapping direct dans le CLI)
+            match raise_core::services::workflow_service::set_sensor_value(&ctx.storage, value)
+                .await
+            {
+                Ok(_) => user_success!("SENSOR_UPDATED", json_value!({"value": value})),
+                Err(e) => raise_error!("ERR_SENSOR_UPDATE_FAILED", error = e.to_string()),
+            }
         }
     }
     Ok(())
@@ -221,12 +221,12 @@ pub async fn handle(args: WorkflowArgs, ctx: CliContext) -> RaiseResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raise_core::utils::testing::{AgentDbSandbox, DbSandbox};
+    use raise_core::utils::testing::AgentDbSandbox;
 
     #[async_test]
     #[serial_test::serial] // 🎯 FIX : Empêche les conflits de session et de VRAM
     async fn test_cli_set_sensor_writes_to_db() -> RaiseResult<()> {
-        let sandbox = AgentDbSandbox::new().await?;
+        let sandbox = raise_core::utils::testing::AgentDbSandbox::new().await?;
 
         let config = AppConfig::get();
         let storage = sandbox.db.clone();
@@ -235,12 +235,15 @@ mod tests {
         // 1. Initialisation du contexte CLI mocké
         let ctx = CliContext::mock(config, session_mgr, storage);
 
-        // 2. 🎯 FIX : On crée la collection dans le domaine ACTIF du contexte (domaine métier)
-        // C'est ici que résidait l'erreur : on pointait sur la partition système au lieu de mock_domain
-        let manager = CollectionsManager::new(&ctx.storage, &ctx.active_domain, &ctx.active_db);
+        // 2. 🎯 FIX : On crée la collection dans la partition SYSTÈME (SSOT du Jumeau Numérique)
+        let manager = CollectionsManager::new(
+            &ctx.storage,
+            &config.mount_points.system.domain,
+            &config.mount_points.system.db,
+        );
 
         // Initialisation de la base de données de travail
-        DbSandbox::mock_db(&manager).await?;
+        raise_core::utils::testing::DbSandbox::mock_db(&manager).await?;
 
         manager
             .create_collection(
@@ -258,7 +261,7 @@ mod tests {
         )
         .await?;
 
-        // 4. Vérification
+        // 4. Vérification dans la partition système
         let doc = manager
             .get_document("digital_twin", "vibration_z")
             .await?

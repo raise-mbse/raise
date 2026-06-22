@@ -583,6 +583,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_mount_point_resolution_integrity() -> RaiseResult<()> {
+        let _ = AppConfig::init();
+
         let config = AppConfig::get();
 
         if config.mount_points.system.domain.is_empty() {

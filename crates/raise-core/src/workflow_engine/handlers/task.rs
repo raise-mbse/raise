@@ -74,10 +74,11 @@ impl NodeHandler for TaskHandler {
         // ====================================================================
         // 3. EXÉCUTION DE LA SQUAD (BOUCLE ACL)
         // ====================================================================
-        let agent_result = {
-            let mut orch = shared_ctx.orchestrator.lock().await;
-            orch.execute_workflow(&rich_mission).await?
+        let squad_runner = {
+            let orch = shared_ctx.orchestrator.lock().await;
+            orch.squad_runner()
         };
+        let agent_result = squad_runner.execute_workflow(&rich_mission).await?;
 
         let mut new_artifacts = context
             .get("generated_artifacts")

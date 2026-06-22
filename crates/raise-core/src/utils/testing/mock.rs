@@ -1220,7 +1220,7 @@ impl AgentDbSandbox {
         inject_mock_component(
             &temp_manager,
             "ai_graph_store",
-            json_value!({ "embedding_dim": 16, "provider": "native" , "storage_mode": "memory"}),
+            json_value!({ "embedding_dim": 32, "provider": "native" , "storage_mode": "memory"}),
         )
         .await?;
 
@@ -1248,7 +1248,7 @@ impl AgentDbSandbox {
             "ai_world_model",
             json_value!({
                 "vocab_size": 1000, // 🎯 FIX : Correspondance avec les anciens helpers (1000 au lieu de 16)
-                "embedding_dim": 16,
+                "embedding_dim": 32,
                 "action_dim": 8,
                 "hidden_dim": 32,
                 "use_gpu": true,

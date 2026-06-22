@@ -212,8 +212,8 @@ mod tests {
             .upsert_document(
                 "workflow_definitions",
                 json_value!({
-                    "handle": "tpl_1", "name": "Tpl", "entry": "start",
-                    "nodes": [{"id": "start", "type": "task", "name": "Start", "params": {}}],
+                    "handle": "tpl_1", "name": "Tpl", "entry_node_id": "start",
+                    "nodes": [{"node_id": "start", "type": "task", "name": "Start", "params": {}}],
                     "edges": []
                 }),
             )

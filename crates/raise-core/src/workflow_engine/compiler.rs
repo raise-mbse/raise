@@ -13,7 +13,8 @@ impl WorkflowCompiler {
     async fn resolve_tool_dependency(
         manager: &CollectionsManager<'_>,
         rule_name: &str,
-    ) -> Option<(String, JsonValue, String)> {
+    ) -> RaiseResult<(String, JsonValue, String)> {
+        // 🎯 CORRECTION : Option -> RaiseResult
         match manager
             .get_document("configs", "ref:configs:tool_dependencies")
             .await
@@ -37,13 +38,23 @@ impl WorkflowCompiler {
                             .to_string();
 
                         if !tool_name.is_empty() {
-                            return Some((tool_name, arguments, output_key));
+                            return Ok((tool_name, arguments, output_key));
                         }
                     }
                 }
-                None
+                raise_error!(
+                    "ERR_COMPILER_TOOL_MISSING",
+                    error = format!(
+                        "Aucune configuration d'outil trouvée pour la règle '{}'.",
+                        rule_name
+                    ),
+                    context = json_value!({"rule": rule_name})
+                )
             }
-            _ => None, // Résilience : On ignore si la config est absente ou corrompue
+            _ => raise_error!(
+                "ERR_COMPILER_TOOL_CONFIG_UNAVAILABLE",
+                error = "La configuration système des outils MCP est introuvable."
+            ),
         }
     }
 
@@ -104,28 +115,28 @@ impl WorkflowCompiler {
 
         for (i, veto) in mandate.hard_logic.vetos.iter().enumerate() {
             if veto.active {
-                // Résolution Tooling MCP
-                if let Some((tool_name, args, output_key)) =
-                    Self::resolve_tool_dependency(manager, &veto.rule).await
-                {
-                    let tool_node_id = format!("tool_read_{}_{}", veto.rule.to_lowercase(), i);
-                    workflow.nodes.push(WorkflowNode {
-                        id: tool_node_id.clone(),
-                        r#type: NodeType::CallMcp,
-                        name: format!("Lecture pour {}", veto.rule),
-                        params: json_value!({
-                            "tool_name": tool_name,
-                            "arguments": args,
-                            "output_key": output_key
-                        }),
-                    });
-                    workflow.edges.push(WorkflowEdge {
-                        from: previous_node_id.clone(),
-                        to: tool_node_id.clone(),
-                        condition: None,
-                    });
-                    previous_node_id = tool_node_id;
-                }
+                // 🎯 Résolution Tooling MCP stricte
+                let (tool_name, args, output_key) =
+                    Self::resolve_tool_dependency(manager, &veto.rule).await?;
+
+                let tool_node_id = format!("tool_read_{}_{}", veto.rule.to_lowercase(), i);
+                workflow.nodes.push(WorkflowNode {
+                    id: tool_node_id.clone(),
+                    r#type: NodeType::CallMcp,
+                    name: format!("Lecture pour {}", veto.rule),
+                    params: json_value!({
+                        "tool_name": tool_name,
+                        "arguments": args,
+                        "output_key": output_key
+                    }),
+                });
+                workflow.edges.push(WorkflowEdge {
+                    from: previous_node_id.clone(),
+                    to: tool_node_id.clone(),
+                    channel: None,
+                    condition: None,
+                });
+                previous_node_id = tool_node_id;
 
                 // Nœud de contrôle QualityGate
                 let node_id = format!("quality_gate_{}_{}", veto.rule.to_lowercase(), i);
@@ -150,6 +161,7 @@ impl WorkflowCompiler {
                 workflow.edges.push(WorkflowEdge {
                     from: previous_node_id.clone(),
                     to: node_id.clone(),
+                    channel: None,
                     condition: None,
                 });
                 previous_node_id = node_id;
@@ -199,6 +211,24 @@ mod tests {
             manager.space, manager.db
         );
 
+        manager.create_collection("configs", &schema_uri).await?;
+        manager
+            .upsert_document(
+                "configs",
+                json_value!({
+                    "handle": "tool_dependencies",
+                    "_id": "ref:configs:tool_dependencies",
+                    "mappings": {
+                        "ISO_26262_CHK": {
+                            "tool_name": "safety_checker",
+                            "arguments": {},
+                            "output_key": "safety_report"
+                        }
+                    }
+                }),
+            )
+            .await?;
+
         // 1. Setup Workflow Template
         manager
             .create_collection("workflow_definitions", &schema_uri)
@@ -208,12 +238,12 @@ mod tests {
                 "workflow_definitions",
                 json_value!({
                     "handle": "tpl_mbse_v1",
-                    "entry": "start",
+                    "entry_node_id": "start",  
                     "nodes": [
-                        { "id": "start", "type": "task", "name": "Start", "params": {} },
-                        { "id": "task_1", "type": "task", "name": "Phase LA", "params": {} }
+                        { "node_id": "start", "type": "task", "name": "Start", "params": {} },  
+                        { "node_id": "task_1", "type": "task", "name": "Phase LA", "params": {} }  
                     ],
-                    "edges": [{ "from": "start", "to": "task_1", "condition": null }]
+                    "edges": [{ "from_node_id": "start", "to_node_id": "task_1", "condition": null }]  
                 }),
             )
             .await?;
@@ -249,9 +279,15 @@ mod tests {
 
         let wf = WorkflowCompiler::compile(&manager, "mission_alpha").await?;
 
-        // Validation
-        assert_eq!(wf.nodes.len(), 3);
+        // 🎯 FIX : Le graphe passe de 3 à 4 nœuds car le compilateur
+        // a automatiquement tissé un nœud CallMcp *avant* le QualityGate.
+        assert_eq!(wf.nodes.len(), 4);
+
+        // On vérifie que l'outil de collecte et la porte de qualité sont bien présents
+        assert!(wf.nodes.iter().any(|n| n.r#type == NodeType::CallMcp));
         assert!(wf.nodes.iter().any(|n| n.r#type == NodeType::QualityGate));
+
+        // Le routage final vers la porte de qualité doit toujours exister
         assert!(wf
             .edges
             .iter()
@@ -284,9 +320,16 @@ mod tests {
         let sandbox = AgentDbSandbox::new().await?;
         let manager = CollectionsManager::new(&sandbox.db, "test", "test");
 
-        // On teste que la fonction ne panique pas si la collection configs est absente
-        let dep = WorkflowCompiler::resolve_tool_dependency(&manager, "non_existent_rule").await;
-        assert!(dep.is_none());
-        Ok(())
+        // 🎯 FIX : Le compilateur est désormais "Fail-Fast".
+        // Il DOIT lever une erreur si la configuration système est absente.
+        let result = WorkflowCompiler::resolve_tool_dependency(&manager, "DUMMY_RULE").await;
+
+        match result {
+            Err(crate::utils::core::error::AppError::Structured(err)) => {
+                assert_eq!(err.code, "ERR_COMPILER_TOOL_CONFIG_UNAVAILABLE");
+                Ok(())
+            }
+            _ => panic!("Le compilateur aurait dû lever ERR_COMPILER_TOOL_CONFIG_UNAVAILABLE"),
+        }
     }
 }
