@@ -3,7 +3,7 @@
 use crate::ai::graph_store::adjacency::GraphAdjacency;
 use crate::ai::world_model::perception::encoder::HybridEncoder;
 use crate::json_db::collections::manager::CollectionsManager;
-use crate::model_engine::types::{ArcadiaElement, NameType};
+use crate::model_engine::types::{ArcadiaElement, SlugString};
 use crate::utils::prelude::*;
 
 pub struct SoftwareGraphBuilder;
@@ -133,22 +133,16 @@ impl SoftwareGraphBuilder {
 
         for doc in &documents {
             let kind = match doc.get("element_type").and_then(|v| v.as_str()) {
-                Some(t) if t.eq_ignore_ascii_case("function") => {
-                    "https://raise.io/ontology/arcadia/pa#PhysicalFunction"
-                }
-                _ => "https://raise.io/ontology/arcadia/pa#PhysicalComponent",
+                Some(t) if t.eq_ignore_ascii_case("function") => "pa:PhysicalFunction",
+                _ => "pa:PhysicalComponent",
             };
 
             let element = ArcadiaElement {
-                id: doc
-                    .get("handle")
-                    .or_else(|| doc.get("_id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-                name: NameType::default(),
-                kind: kind.to_string(),
+                handle: SlugString::from_json(doc.get("handle"), "unknown"),
+                name: I18nString::default(),
+                kind: vec![kind.to_string()],
                 properties: UnorderedMap::new(),
+                ..Default::default()
             };
 
             // 🎯 FIX ZERO-COPY : Utilisation de CowData
@@ -312,8 +306,8 @@ mod tests {
 
         assert_eq!(
             features.dims(),
-            &[n_nodes, 32],
-            "Les features extraites doivent être une matrice [N, 32]."
+            &[n_nodes, 36],
+            "Les features extraites doivent être une matrice [N, 36]."
         );
 
         Ok(())

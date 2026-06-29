@@ -47,13 +47,15 @@ impl SystemModelProvider for ProjectModel {
                     .get("complexity")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(10.0) as f32;
-                let handle = f
+                let id = f
                     .properties
                     .get("handle")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(&f.id);
+                    .unwrap_or(f.handle.as_str())
+                    .to_string();
+
                 ModelFunction {
-                    id: handle.to_string(),
+                    id,
                     name: f.name.as_str().to_string(),
                     complexity,
                 }
@@ -71,13 +73,16 @@ impl SystemModelProvider for ProjectModel {
                     .get("capacity")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(100.0) as f32;
-                let handle = c
+
+                let id = c
                     .properties
                     .get("handle")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(&c.id);
+                    .unwrap_or(c.handle.as_str())
+                    .to_string();
+
                 ModelComponent {
-                    id: handle.to_string(),
+                    id,
                     name: c.name.as_str().to_string(),
                     capacity_limit: capacity,
                 }
@@ -221,63 +226,69 @@ impl GeneticsAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::{ArcadiaElement, NameType, ProjectModel};
+    use crate::model_engine::types::{ArcadiaElement, ProjectModel};
 
-    fn make_element(id: &str, name: &str, kind: &str) -> ArcadiaElement {
-        ArcadiaElement {
-            id: id.to_string(),
-            name: NameType::String(name.to_string()),
-            kind: kind.to_string(),
-            // 🎯 FIX : Suppression du champ description
+    fn make_element(id: &str, name: &str, kind: &str) -> RaiseResult<ArcadiaElement> {
+        Ok(ArcadiaElement {
+            handle: id.try_into()?,
+            name: I18nString::Single(name.to_string()),
+            kind: vec![kind.to_string()],
             properties: UnorderedMap::new(),
-        }
+            ..Default::default()
+        })
     }
 
-    fn create_mock_project() -> ProjectModel {
+    fn create_mock_project() -> RaiseResult<ProjectModel> {
         let mut model = ProjectModel::default();
 
-        let mut f1 = make_element("F1", "Navigation", "LogicalFunction");
-        f1.properties.insert("handle".into(), json_value!("fn_nav")); // 🎯 Ajout test
+        // 1. Navigation (F1)
+        let mut f1 = make_element("F1", "Navigation", "LogicalFunction")?;
+        f1.properties.insert("handle".into(), json_value!("fn_nav"));
         f1.properties.insert("complexity".into(), json_value!(20.0));
+        // On insère f1 dans le modèle APRÈS toutes les modifs
         model.add_element("la", "functions", f1);
 
-        let mut f2 = make_element("F2", "Radio", "LogicalFunction");
+        // 2. Radio (F2)
+        let mut f2 = make_element("F2", "Radio", "LogicalFunction")?;
         f2.properties
-            .insert("handle".into(), json_value!("fn_radio")); // 🎯 Ajout test
+            .insert("handle".into(), json_value!("fn_radio"));
         f2.properties.insert("complexity".into(), json_value!(10.0));
         model.add_element("la", "functions", f2);
 
-        let mut c1 = make_element("C1", "MainCPU", "PhysicalComponent");
+        // 3. CPU (C1)
+        let mut c1 = make_element("C1", "MainCPU", "PhysicalComponent")?;
         c1.properties
-            .insert("handle".into(), json_value!("comp_cpu")); // 🎯 Ajout test
+            .insert("handle".into(), json_value!("comp_cpu"));
         c1.properties.insert("capacity".into(), json_value!(100.0));
         model.add_element("pa", "components", c1);
 
-        let mut ex = make_element("E1", "DataLink", "FunctionalExchange");
+        // 4. DataLink (E1)
+        let mut ex = make_element("E1", "DataLink", "FunctionalExchange")?;
         ex.properties
-            .insert("source_handle".into(), json_value!("fn_nav")); // 🎯 Utilisation handle
+            .insert("source_handle".into(), json_value!("fn_nav"));
         ex.properties
             .insert("target_handle".into(), json_value!("fn_radio"));
         ex.properties.insert("volume".into(), json_value!(50.0));
         model.add_element("la", "exchanges", ex);
 
-        model
+        Ok(model)
     }
 
     #[test]
-    fn test_cost_model_building_corrected() {
-        let model = create_mock_project();
+    fn test_cost_model_building_corrected() -> RaiseResult<()> {
+        let model = create_mock_project()?;
         let adapter = GeneticsAdapter::new(&model);
         let cost_model = adapter.build_cost_model(&model);
 
         assert_eq!(cost_model.function_loads.len(), 2);
         assert_eq!(cost_model.component_capacities.len(), 1);
         assert_eq!(cost_model.data_flow_matrix[0][1], 50.0);
+        Ok(())
     }
 
     #[test]
-    fn test_solution_conversion_back_to_ids() {
-        let model = create_mock_project();
+    fn test_solution_conversion_back_to_ids() -> RaiseResult<()> {
+        let model = create_mock_project()?;
         let adapter = GeneticsAdapter::new(&model);
         let raw_genes = vec![0, 0];
         let sol = adapter.convert_solution(vec![1.0], 0.0, &raw_genes);
@@ -286,5 +297,6 @@ mod tests {
             sol.allocation[0],
             ("fn_nav".to_string(), "comp_cpu".to_string())
         );
+        Ok(())
     }
 }

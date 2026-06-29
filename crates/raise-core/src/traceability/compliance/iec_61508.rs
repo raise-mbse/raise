@@ -70,9 +70,24 @@ impl ComplianceChecker for Iec61508Checker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::utils::testing::mock::DbSandbox;
 
-    #[test]
-    fn test_iec61508_sil_validation() -> RaiseResult<()> {
+    async fn init_test_env() -> RaiseResult<DbSandbox> {
+        let sandbox = DbSandbox::new().await?;
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+        VocabularyRegistry::init_from_db(&mgr).await?;
+        Ok(sandbox)
+    }
+
+    #[async_test]
+    async fn test_iec61508_sil_validation() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new();
 
         // 1. Système conforme (Domaine Industriel + SIL défini)
@@ -121,8 +136,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_iec61508_empty_scope() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_iec61508_empty_scope() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
+
         let docs = UnorderedMap::new();
         let tracer = Tracer::from_json_list(vec![])?;
         let checker = Iec61508Checker;

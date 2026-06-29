@@ -89,23 +89,38 @@ impl ComplianceChecker for AiGovernanceChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::utils::testing::mock::DbSandbox;
 
-    #[test]
-    fn test_audit_ai_model_full_compliance() -> RaiseResult<()> {
+    async fn init_test_env() -> RaiseResult<DbSandbox> {
+        let sandbox = DbSandbox::new().await?;
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+        VocabularyRegistry::init_from_db(&mgr).await?;
+        Ok(sandbox)
+    }
+
+    #[async_test]
+    async fn test_audit_ai_model_full_compliance() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new(); // 🎯 FIX : Type explicite
 
         // Setup : Modèle IA + Ses deux preuves
         docs.insert(
             "AI_1".to_string(),
-            json_value!({ "_id": "AI_1", "nature": "AI_Model", "name": "Boreas" }),
+            json_value!({ "handle": "AI_1", "nature": "AI_Model", "name": "Boreas" }),
         );
         docs.insert(
             "QR_1".to_string(),
-            json_value!({ "_id": "QR_1", "kind": "QualityReport", "model_id": "AI_1" }),
+            json_value!({ "handle": "QR_1", "kind": "QualityReport", "model_id": "AI_1" }),
         );
         docs.insert(
             "XAI_1".to_string(),
-            json_value!({ "_id": "XAI_1", "kind": "XaiFrame", "model_id": "AI_1" }),
+            json_value!({ "handle": "XAI_1", "kind": "XaiFrame", "model_id": "AI_1" }),
         );
 
         let tracer = Tracer::from_json_list(docs.values().cloned().collect())?;
@@ -120,13 +135,14 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_audit_ai_model_missing_everything() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_audit_ai_model_missing_everything() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new();
         // Setup : Modèle IA tout seul
         docs.insert(
             "AI_EMPTY".to_string(),
-            json_value!({ "_id": "AI_EMPTY", "nature": "AI_Model" }),
+            json_value!({ "handle": "AI_EMPTY", "nature": "AI_Model" }),
         );
 
         let tracer = Tracer::from_json_list(docs.values().cloned().collect())?;

@@ -51,7 +51,7 @@ impl Tracer {
         let registry = VocabularyRegistry::global()?;
 
         for doc in documents {
-            let id = match doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
+            let id = match doc.get("handle").and_then(|v| v.as_str()) {
                 Some(id) => id.to_string(),
                 None => continue,
             };
@@ -125,27 +125,64 @@ fn is_link_property(key: &str, ctx: &ContextManager, registry: &VocabularyRegist
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::{ArcadiaElement, NameType};
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::model_engine::types::ArcadiaElement;
+    use crate::utils::testing::mock::DbSandbox;
 
-    #[test]
-    fn test_reverse_indexing_ai_model() -> RaiseResult<()> {
+    async fn init_test_env() -> RaiseResult<DbSandbox> {
+        let sandbox = DbSandbox::new().await?;
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+        VocabularyRegistry::init_from_db(&mgr).await?;
+        Ok(sandbox)
+    }
+
+    #[async_test]
+    async fn test_reverse_indexing_ai_model() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
+
         let mut model = ProjectModel::default();
-        let mut props = UnorderedMap::new();
-        props.insert("model_id".to_string(), json_value!("ai_1"));
 
-        // 🎯 FIX : Suppression du champ 'description' et usage de 'add_element'
+        // 1. Cible
         model.add_element(
             "pa",
             "components",
             ArcadiaElement {
-                id: "rep_1".into(),
-                name: NameType::String("Report".into()),
-                kind: "QualityReport".into(),
-                properties: props,
+                handle: "ai_1".try_into()?,
+                kind: vec!["AIModel".into()],
+                ..Default::default()
             },
         );
 
+        // 2. Source
+        let mut props = UnorderedMap::new();
+        props.insert("model_id".to_string(), json_value!("ai_1"));
+
+        model.add_element(
+            "pa",
+            "components",
+            ArcadiaElement {
+                handle: "rep_1".try_into()?,
+                kind: vec!["QualityReport".into()],
+                properties: props, // Ceci sera sérialisé sous {"properties": {"model_id": ...}}
+                ..Default::default()
+            },
+        );
+
+        // 🎯 DEBUG : Force l'affichage pour vérifier la structure sérialisée
+        let docs: Vec<JsonValue> = model
+            .all_elements()
+            .iter()
+            .map(|e| crate::utils::json::serialize_to_value((*e).clone()).unwrap())
+            .collect();
+        println!("DEBUG JSON: {:?}", docs);
+
         let tracer = Tracer::from_legacy_model(&model)?;
+
         let upstream = tracer.get_upstream_ids("ai_1");
 
         assert_eq!(

@@ -120,10 +120,32 @@ impl AuditGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::utils::testing::mock::DbSandbox;
+
+    async fn init_registry() -> RaiseResult<DbSandbox> {
+        // 1. Création de la sandbox isolée
+        let sandbox = DbSandbox::new().await?;
+
+        // 2. Création du manager pour la sandbox
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+
+        // 3. Initialisation du registre
+        VocabularyRegistry::init_from_db(&mgr).await?;
+
+        Ok(sandbox)
+    }
 
     /// 🎯 TEST 1 : Vérification de l'intégralité du rapport
-    #[test]
-    fn test_audit_generate_full_report() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_audit_generate_full_report() -> RaiseResult<()> {
+        init_registry().await?;
+
         let mut docs = UnorderedMap::new();
         docs.insert(
             "F1".into(),
@@ -142,8 +164,9 @@ mod tests {
     }
 
     /// 🎯 TEST 2 : Robustesse du comptage sémantique (Stats)
-    #[test]
-    fn test_calculate_stats_semantic_mapping() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_calculate_stats_semantic_mapping() -> RaiseResult<()> {
+        init_registry().await?;
         let mut docs = UnorderedMap::new();
         docs.insert("1".into(), json_value!({ "kind": "Function" }));
         docs.insert(
@@ -169,8 +192,9 @@ mod tests {
     }
 
     /// 🎯 TEST 3 : Résilience aux données JSON malformées
-    #[test]
-    fn test_robustness_malformed_json() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_robustness_malformed_json() -> RaiseResult<()> {
+        init_registry().await?;
         let mut docs_empty = UnorderedMap::new();
         // 1. Un document totalement vide ne fait pas planter, il est juste ignoré par les stats.
         docs_empty.insert("empty".into(), json_value!({}));
@@ -199,8 +223,9 @@ mod tests {
     }
 
     /// 🎯 TEST 4 : Intégrité de la date ISO-8601
-    #[test]
-    fn test_audit_date_format() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_audit_date_format() -> RaiseResult<()> {
+        init_registry().await?;
         let tracer = Tracer::from_json_list(vec![])?;
         let report = AuditGenerator::generate(&tracer, &UnorderedMap::new(), "Date Test")?;
 

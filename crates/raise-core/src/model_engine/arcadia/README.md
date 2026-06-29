@@ -155,8 +155,8 @@ let comp = LogicalComponent {
         modified_at: chrono::Utc::now().to_rfc3339(),
     },
     props: ArcadiaProperties {
-        name: I18nString::String("Contrôleur de Vol".into()),
-        description: Some(I18nString::String("Gère la stabilité".into())),
+        name: I18nString::Single("Contrôleur de Vol".into()),
+        description: Some(I18nString::Single("Gère la stabilité".into())),
         ..Default::default()
     },
     is_abstract: false,

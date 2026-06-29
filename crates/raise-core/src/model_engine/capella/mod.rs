@@ -1,3 +1,5 @@
+// FICHIER : crates/raise-core/src/model_engine/capella/mod.rs
+
 pub mod diagram_generator;
 pub mod model_reader;
 pub mod model_writer;

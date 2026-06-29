@@ -68,9 +68,24 @@ impl ComplianceChecker for Iso26262Checker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::utils::testing::mock::DbSandbox;
 
-    #[test]
-    fn test_iso26262_asil_strict_check() -> RaiseResult<()> {
+    async fn init_test_env() -> RaiseResult<DbSandbox> {
+        let sandbox = DbSandbox::new().await?;
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+        VocabularyRegistry::init_from_db(&mgr).await?;
+        Ok(sandbox)
+    }
+
+    #[async_test]
+    async fn test_iso26262_asil_strict_check() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new();
 
         // 1. Composant conforme (Critique + ASIL D)
@@ -120,8 +135,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_iso26262_no_critical_components() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_iso26262_no_critical_components() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new();
         docs.insert(
             "Lamp".to_string(),

@@ -27,6 +27,12 @@ pub enum I18nString {
     Multi(OrderedMap<String, String>),
 }
 
+impl Default for I18nString {
+    fn default() -> Self {
+        Self::Single("Unnamed".to_string())
+    }
+}
+
 impl I18nString {
     /// Récupère la traduction pour une langue donnée avec fallback sécurisé (sans panique).
     pub fn get_text(&self, lang: &str) -> String {
@@ -38,6 +44,19 @@ impl I18nString {
                 .or_else(|| map.values().next())
                 .cloned()
                 .unwrap_or_default(),
+        }
+    }
+
+    /// Helper rétrocompatible pour récupérer une représentation textuelle rapide
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Single(s) => s.as_str(),
+            Self::Multi(map) => map
+                .get("fr")
+                .or_else(|| map.get("en"))
+                .or_else(|| map.values().next())
+                .map(|s| s.as_str())
+                .unwrap_or("Unnamed"),
         }
     }
 }

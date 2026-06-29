@@ -2,7 +2,7 @@
 
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::model_engine::arcadia::ArcadiaOntology;
-use crate::model_engine::types::{ArcadiaElement, NameType};
+use crate::model_engine::types::ArcadiaElement;
 use crate::utils::prelude::*;
 
 pub struct DialogueToModelTransformer;
@@ -33,6 +33,14 @@ impl DialogueToModelTransformer {
             .get_document("configs", "ref:configs:handle:ontological_mapping")
             .await?
             .unwrap_or_else(|| json_value!({}));
+
+        // On génère un slug propre à partir du nom de l'intention
+        let handle_str = intent
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unnamed")
+            .to_lowercase()
+            .replace(" ", "_");
 
         let mut type_uri = None;
 
@@ -78,10 +86,11 @@ impl DialogueToModelTransformer {
         }
 
         Ok(ArcadiaElement {
-            id: UniqueId::new_v4().to_string(),
-            name: NameType::String(name_str.to_string()),
-            kind: final_uri,
+            handle: handle_str.as_str().try_into()?,
+            name: I18nString::Single(name_str.to_string()),
+            kind: vec![final_uri],
             properties,
+            ..Default::default()
         })
     }
 }
@@ -117,7 +126,7 @@ mod tests {
 
         assert_eq!(
             el.kind,
-            "https://raise.io/la#LogicalComponent" // <-- On retire "/ontology/arcadia"
+            vec!["https://raise.io/la#LogicalComponent"] // <-- On retire "/ontology/arcadia"
         );
         // Vérification de l'aplatissement des propriétés dynamiques (Pure Graph)
         assert_eq!(
@@ -148,7 +157,7 @@ mod tests {
             .unwrap();
 
         // Le fallback par défaut est la couche SA (System Analysis)
-        assert!(el.kind.contains("/sa#PhysicalActor"));
+        assert!(el.kind.iter().any(|k| k.contains("/sa#PhysicalActor")));
 
         Ok(())
     }

@@ -274,14 +274,16 @@ impl VocabularyRegistry {
         self.get_state().default_context.clone()
     }
 
-    pub fn is_subtype_of(&self, child: &str, parent: &str) -> bool {
-        if child == parent {
-            return true;
-        }
-        self.get_state()
-            .ancestry
-            .get(child)
-            .is_some_and(|a| a.contains(parent))
+    pub fn is_subtype_of(&self, children: &[String], parent: &str) -> bool {
+        children.iter().any(|child| {
+            if child == parent {
+                return true;
+            }
+            self.get_state()
+                .ancestry
+                .get(child.as_str())
+                .is_some_and(|a| a.contains(parent))
+        })
     }
 
     pub fn is_iri(t: &str) -> bool {

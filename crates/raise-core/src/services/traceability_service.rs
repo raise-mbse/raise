@@ -19,7 +19,7 @@ fn get_model_docs(model: &ProjectModel) -> UnorderedMap<String, JsonValue> {
 
     for e in model.all_elements() {
         if let Ok(val) = json::serialize_to_value(e) {
-            docs.insert(e.id.clone(), val);
+            docs.insert(e.handle.as_str().to_string(), val);
         }
     }
 

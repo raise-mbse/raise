@@ -51,10 +51,24 @@ pub struct Violation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::utils::testing::mock::DbSandbox;
+
+    async fn init_test_env() -> RaiseResult<DbSandbox> {
+        let sandbox = DbSandbox::new().await?;
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+        VocabularyRegistry::init_from_db(&mgr).await?;
+        Ok(sandbox)
+    }
 
     /// 🎯 TEST 1 : Vérifie que le rapport de conformité survit à l'IPC (Tauri <-> Frontend)
-    #[test]
-    fn test_robust_serialization_contract() {
+    #[async_test]
+    async fn test_robust_serialization_contract() {
         let violation = Violation {
             element_id: Some("id_456".to_string()),
             rule_id: "RULE-X".to_string(),
@@ -110,16 +124,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_checker_logic_with_injected_graph() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_checker_logic_with_injected_graph() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new();
         // A est lié à B. C est seul.
         docs.insert(
             "A".to_string(),
-            json_value!({ "_id": "A", "allocatedTo": "B" }),
+            json_value!({ "handle": "A", "allocatedTo": "B" }),
         );
-        docs.insert("B".to_string(), json_value!({ "_id": "B" }));
-        docs.insert("C".to_string(), json_value!({ "_id": "C" }));
+        docs.insert("B".to_string(), json_value!({ "handle": "B" }));
+        docs.insert("C".to_string(), json_value!({ "handle": "C" }));
 
         // 🎯 On construit le Tracer en mémoire uniquement pour ce test
         let tracer = Tracer::from_json_list(docs.values().cloned().collect())?;

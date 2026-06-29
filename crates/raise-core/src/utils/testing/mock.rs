@@ -39,6 +39,15 @@ impl LlmEngine for MockLlmEngine {
     async fn generate(&mut self, _: &str, _: &str, _: usize) -> RaiseResult<String> {
         Ok(self.response.clone())
     }
+    async fn generate_with_grammar(
+        &mut self,
+        _system: &str,
+        _user: &str,
+        _max_tokens: usize,
+        _grammar_str: &str,
+    ) -> RaiseResult<String> {
+        Ok(self.response.clone())
+    }
 }
 
 // --- DÉFINITION DES SCHÉMAS STANDARDS POUR TESTS ---

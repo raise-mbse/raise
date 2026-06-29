@@ -144,10 +144,11 @@ impl IntentClassifier {
 
         // 2. 🔄 BOUCLE DE RÉFLEXION POUR LA CLASSIFICATION LLM
         let system_prompt = "Tu es le Dispatcher IA de RAISE. Tu convertis les demandes utilisateur en JSON STRICT.\n\
-                             SCHÉMAS :\n\
-                             - Création : { \"intent\": \"create_element\", \"layer\": \"SA|LA|PA|DATA|OA|TRANSVERSE\", \"element_type\": \"str\", \"name\": \"str\" }\n\
-                             - Code : { \"intent\": \"generate_code\", \"language\": \"str\", \"filename\": \"str\" }\n\
-                             - Chat : { \"intent\": \"chat\" }";
+        SCHÉMAS :\n\
+        - Création : { \"intent\": \"create_element\", \"layer\": \"SA|LA|PA|DATA|OA|TRANSVERSE\", \"element_type\": \"str\", \"name\": \"str\" }\n\
+        - Code : { \"intent\": \"generate_code\", \"language\": \"str\", \"filename\": \"str\" }\n\
+        - Mutation : { \"intent\": \"mutate_code\", \"module_name\": \"str\", \"target_handle\": \"str\", \"instruction\": \"str\" }\n\
+        - Chat : { \"intent\": \"chat\" }";
 
         let mut current_feedback = String::new();
         let max_retries = 2;

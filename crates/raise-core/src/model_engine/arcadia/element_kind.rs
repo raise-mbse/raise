@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/model_engine/arcadia/element_kind.rs
+// FICHIER : crates/raise-core/src/model_engine/arcadia/element_kind.rs
 
 use crate::model_engine::types::ArcadiaElement;
 use crate::utils::prelude::*;
@@ -56,20 +56,31 @@ impl ArcadiaSemantics for ArcadiaElement {
     fn get_layer(&self) -> Layer {
         let k = &self.kind;
 
-        // Déduction agnostique par segment d'URI
-        if k.contains("/oa#") {
+        // Déduction agnostique par segment d'URI ou préfixe de type sur le vecteur
+        if k.iter().any(|s| s.contains("/oa#") || s.starts_with("oa:")) {
             Layer::OperationalAnalysis
-        } else if k.contains("/sa#") {
+        } else if k.iter().any(|s| s.contains("/sa#") || s.starts_with("sa:")) {
             Layer::SystemAnalysis
-        } else if k.contains("/la#") {
+        } else if k.iter().any(|s| s.contains("/la#") || s.starts_with("la:")) {
             Layer::LogicalArchitecture
-        } else if k.contains("/pa#") {
+        } else if k.iter().any(|s| s.contains("/pa#") || s.starts_with("pa:")) {
             Layer::PhysicalArchitecture
-        } else if k.contains("/epbs#") {
+        } else if k
+            .iter()
+            .any(|s| s.contains("/epbs#") || s.starts_with("epbs:"))
+        {
             Layer::EPBS
-        } else if k.contains("/data#") {
+        } else if k
+            .iter()
+            .any(|s| s.contains("/data#") || s.starts_with("data:"))
+        {
             Layer::Data
-        } else if k.contains("/transverse") || k.contains("/common") || k.contains("/libraries") {
+        } else if k.iter().any(|s| {
+            s.contains("/transverse")
+                || s.contains("/common")
+                || s.contains("/libraries")
+                || s.starts_with("transverse:")
+        }) {
             Layer::Transverse
         } else {
             Layer::Unknown
@@ -80,20 +91,37 @@ impl ArcadiaSemantics for ArcadiaElement {
     fn get_category(&self) -> ElementCategory {
         let k = &self.kind;
 
-        // Déduction agnostique par suffixe d'URI
-        if k.ends_with("Component") || k.ends_with("System") || k.ends_with("ConfigurationItem") {
+        // Déduction agnostique par suffixe d'URI sur le vecteur
+        if k.iter().any(|s| {
+            s.ends_with("Component") || s.ends_with("System") || s.ends_with("ConfigurationItem")
+        }) {
             ElementCategory::Component
-        } else if k.ends_with("Function") || k.ends_with("Activity") {
+        } else if k
+            .iter()
+            .any(|s| s.ends_with("Function") || s.ends_with("Activity"))
+        {
             ElementCategory::Function
-        } else if k.ends_with("Actor") {
+        } else if k.iter().any(|s| s.ends_with("Actor")) {
             ElementCategory::Actor
-        } else if k.ends_with("Exchange") || k.ends_with("Flow") || k.ends_with("Link") {
+        } else if k
+            .iter()
+            .any(|s| s.ends_with("Exchange") || s.ends_with("Flow") || s.ends_with("Link"))
+        {
             ElementCategory::Exchange
-        } else if k.ends_with("Interface") || k.ends_with("Port") {
+        } else if k
+            .iter()
+            .any(|s| s.ends_with("Interface") || s.ends_with("Port"))
+        {
             ElementCategory::Interface
-        } else if k.ends_with("Class") || k.ends_with("DataType") || k.ends_with("ExchangeItem") {
+        } else if k
+            .iter()
+            .any(|s| s.ends_with("Class") || s.ends_with("DataType") || s.ends_with("ExchangeItem"))
+        {
             ElementCategory::Data
-        } else if k.ends_with("Capability") || k.ends_with("Scenario") {
+        } else if k
+            .iter()
+            .any(|s| s.ends_with("Capability") || s.ends_with("Scenario"))
+        {
             ElementCategory::Capability
         } else {
             ElementCategory::Other
@@ -122,52 +150,55 @@ impl ArcadiaSemantics for ArcadiaElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::{ArcadiaElement, NameType};
+    use crate::model_engine::types::ArcadiaElement;
 
     /// Helper pour créer un élément de test compatible Pure Graph
-    fn make_el(kind: &str) -> ArcadiaElement {
-        ArcadiaElement {
-            id: "test_id".to_string(),
-            name: NameType::default(),
-            kind: kind.to_string(),
-            // 🎯 PURE GRAPH : Plus de champ description ici, on utilise la map properties vide
+    fn make_el(kind: &str) -> RaiseResult<ArcadiaElement> {
+        Ok(ArcadiaElement {
+            handle: "test_id".try_into()?,
+            name: I18nString::default(),
+            kind: vec![kind.to_string()],
             properties: UnorderedMap::new(),
-        }
+            ..Default::default()
+        })
     }
 
     #[test]
-    fn test_layer_detection_agnostic() {
-        let el_oa = make_el("https://raise.io/ontology/arcadia/oa#OperationalActor");
+    fn test_layer_detection_agnostic() -> RaiseResult<()> {
+        let el_oa = make_el("oa:OperationalActor")?;
         assert_eq!(el_oa.get_layer(), Layer::OperationalAnalysis);
 
-        let el_sa = make_el("https://raise.io/ontology/arcadia/sa#SystemFunction");
+        let el_sa = make_el("sa:SystemFunction")?;
         assert_eq!(el_sa.get_layer(), Layer::SystemAnalysis);
 
-        let el_data = make_el("https://raise.io/ontology/arcadia/data#Class");
+        let el_data = make_el("data:Class")?;
         assert_eq!(el_data.get_layer(), Layer::Data);
 
-        let el_trans = make_el("https://raise.io/ontology/arcadia/transverse#Requirement");
+        let el_trans = make_el("transverse:Requirement")?;
         assert_eq!(el_trans.get_layer(), Layer::Transverse);
+        Ok(())
     }
 
     #[test]
-    fn test_category_detection_agnostic() {
-        let comp = make_el("https://raise.io/ontology/arcadia/pa#PhysicalComponent");
+    fn test_category_detection_agnostic() -> RaiseResult<()> {
+        let comp = make_el("pa:PhysicalComponent")?;
         assert_eq!(comp.get_category(), ElementCategory::Component);
         assert!(comp.is_structural());
 
-        let func = make_el("https://raise.io/ontology/arcadia/sa#SystemFunction");
+        let func = make_el("sa:SystemFunction")?;
         assert_eq!(func.get_category(), ElementCategory::Function);
         assert!(func.is_behavioral());
 
-        let data = make_el("https://raise.io/ontology/arcadia/data#DataType");
+        let data = make_el("data:DataType")?;
         assert_eq!(data.get_category(), ElementCategory::Data);
+        Ok(())
     }
 
     #[test]
-    fn test_unknown_type_handling() {
-        let unknown = make_el("http://external.org/UnknownThing");
+    fn test_unknown_type_handling() -> RaiseResult<()> {
+        let unknown = make_el("http://external.org/UnknownThing")?;
         assert_eq!(unknown.get_layer(), Layer::Unknown);
         assert_eq!(unknown.get_category(), ElementCategory::Other);
+        Ok(())
     }
 }

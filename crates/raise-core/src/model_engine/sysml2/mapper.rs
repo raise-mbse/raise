@@ -4,7 +4,7 @@ use crate::json_db::collections::manager::CollectionsManager;
 use crate::utils::prelude::*;
 
 use super::parser::{Rule, Sysml2Parser};
-use crate::model_engine::types::{ArcadiaElement, NameType, ProjectModel};
+use crate::model_engine::types::{ArcadiaElement, ProjectModel};
 use pest::Parser;
 
 #[derive(Default)]
@@ -67,7 +67,7 @@ impl Sysml2ToArcadiaMapper {
         };
 
         // 3. Traversal AST
-        self.traverse_ast(parsed_file, &mut model, "UnknownLayer", sysml_mappings);
+        self.traverse_ast(parsed_file, &mut model, "UnknownLayer", sysml_mappings)?;
 
         Ok(model)
     }
@@ -78,14 +78,15 @@ impl Sysml2ToArcadiaMapper {
         model: &mut ProjectModel,
         current_layer: &str,
         mappings: &JsonValue,
-    ) {
+    ) -> RaiseResult<()> {
         match pair.as_rule() {
             Rule::package_decl => {
                 let mut inner_rules = pair.into_inner();
                 let pkg_name = inner_rules.next().unwrap().as_str();
                 for inner_pair in inner_rules {
-                    self.traverse_ast(inner_pair, model, pkg_name, mappings);
+                    self.traverse_ast(inner_pair, model, pkg_name, mappings)?;
                 }
+                Ok(())
             }
             Rule::requirement_def | Rule::part_def | Rule::actor_def => {
                 let rule_type = format!("{:?}", pair.as_rule());
@@ -115,19 +116,23 @@ impl Sysml2ToArcadiaMapper {
                 };
 
                 let element = ArcadiaElement {
-                    id: format!("{}-{}-{}", layer, col, ident.to_lowercase()),
-                    name: NameType::String(ident.to_string()),
-                    kind: kind.to_string(),
+                    handle: format!("{}-{}-{}", layer, col, ident.to_lowercase())
+                        .as_str()
+                        .try_into()?,
+                    name: I18nString::Single(ident.to_string()),
+                    kind: vec![kind.to_string()],
                     ..Default::default()
                 };
 
                 // 🎯 FIX : On passe maintenant les 3 arguments requis par ProjectModel
                 model.add_element(layer, col, element);
+                Ok(())
             }
             _ => {
                 for inner_pair in pair.into_inner() {
-                    self.traverse_ast(inner_pair, model, current_layer, mappings);
+                    self.traverse_ast(inner_pair, model, current_layer, mappings)?;
                 }
+                Ok(())
             }
         }
     }

@@ -144,7 +144,7 @@ pub async fn handle(args: GeneticsArgs, ctx: CliContext) -> RaiseResult<()> {
             let gnn_state = SharedRef::new(GnnState::new());
             let gnn_adapter = SharedRef::new(GnnScorerAdapter::new(gnn_state));
 
-            let evaluator = NeuroSymbolicEvaluator::new(base_evaluator, gnn_adapter);
+            let evaluator = NeuroSymbolicEvaluator::new(base_evaluator, gnn_adapter, None);
 
             // E. Moteur et Population Initiale
             let engine = GeneticEngine::new(evaluator, TournamentSelection::new(2), config.clone());

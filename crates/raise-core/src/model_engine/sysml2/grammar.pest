@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/model_engine/sysml2/grammar.pest
+// FICHIER : crates/raise-core/src/model_engine/sysml2/grammar.pest
 
 // Règles silencieuses
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }

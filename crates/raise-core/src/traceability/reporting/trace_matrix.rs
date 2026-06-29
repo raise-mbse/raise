@@ -83,28 +83,44 @@ impl MatrixGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::utils::testing::mock::DbSandbox;
 
-    #[test]
-    fn test_matrix_coverage_logic_robustness() -> RaiseResult<()> {
+    async fn init_test_env() -> RaiseResult<DbSandbox> {
+        let sandbox = DbSandbox::new().await?;
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+        VocabularyRegistry::init_from_db(&mgr).await?;
+        Ok(sandbox)
+    }
+
+    #[async_test]
+    async fn test_matrix_coverage_logic_robustness() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
+
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new();
 
         // Setup : Une fonction liée et une orpheline
         docs.insert(
             "F1".to_string(),
             json_value!({
-                "_id": "F1", "kind": "Function", "name": "Engine Control", "allocatedTo": "C1"
+                "handle": "F1", "kind": "Function", "name": "Engine Control", "allocatedTo": "C1"
             }),
         );
         docs.insert(
             "F2".to_string(),
             json_value!({
-                "_id": "F2", "kind": "Function", "name": "Radio Control"
+                "handle": "F2", "kind": "Function", "name": "Radio Control"
             }),
         );
         docs.insert(
             "C1".to_string(),
             json_value!({
-                "_id": "C1", "kind": "Component", "name": "ECU"
+                "handle": "C1", "kind": "Component", "name": "ECU"
             }),
         );
 
@@ -128,8 +144,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_matrix_serialization_integrity() {
+    #[async_test]
+    async fn test_matrix_serialization_integrity() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
+
         let matrix = TraceabilityMatrix {
             rows: vec![TraceRow {
                 source_id: "S".into(),
@@ -142,5 +160,6 @@ mod tests {
         let serialized = json::serialize_to_string(&matrix).unwrap();
         let deserialized: TraceabilityMatrix = json::deserialize_from_str(&serialized).unwrap();
         assert_eq!(matrix, deserialized);
+        Ok(())
     }
 }

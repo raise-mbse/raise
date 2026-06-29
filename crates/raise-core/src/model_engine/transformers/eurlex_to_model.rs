@@ -1,7 +1,7 @@
 // FICHIER : src-tauri/src/model_engine/transformers/eurlex_to_model.rs
 
 use crate::model_engine::eurlex::parser::EurlexParsedData;
-use crate::model_engine::types::{ArcadiaElement, NameType, ProjectModel};
+use crate::model_engine::types::{ArcadiaElement, ProjectModel};
 use crate::utils::data::UnorderedMap;
 use crate::utils::prelude::*;
 
@@ -28,11 +28,12 @@ impl EurlexToModelTransformer {
         req_props.insert("priority".to_string(), json_value!("Mandatory"));
 
         let requirement = ArcadiaElement {
-            id: "REQ_DIR_2026_288_RENURE".to_string(),
-            name: NameType::String("Dérogation Fertilisants RENURE".to_string()),
+            handle: "REQ_DIR_2026_288_RENURE".try_into()?,
+            name: I18nString::Single("Dérogation Fertilisants RENURE".to_string()),
             // Utilisation stricte de l'URI sémantique de la couche Transverse
-            kind: "https://raise.io/transverse#Requirement".to_string(),
+            kind: vec!["transverse:Requirement".to_string()],
             properties: req_props,
+            ..Default::default()
         };
 
         // Ajout dans la collection dynamique du ProjectModel
@@ -57,10 +58,11 @@ impl EurlexToModelTransformer {
         }
 
         let constraint = ArcadiaElement {
-            id: "CSTR_RENURE_LIMITS".to_string(),
-            name: NameType::String("Seuils de Tolérance RENURE".to_string()),
-            kind: "https://raise.io/transverse#Constraint".to_string(),
+            handle: "CSTR_RENURE_LIMITS".try_into()?,
+            name: I18nString::Single("Seuils de Tolérance RENURE".to_string()),
+            kind: vec!["transverse:Constraint".to_string()],
             properties: constraint_props,
+            ..Default::default()
         };
 
         model.add_element("transverse", "constraints", constraint);
@@ -94,7 +96,7 @@ mod tests {
         let requirements = model.get_collection("transverse", "requirements");
         assert_eq!(requirements.len(), 1, "Une exigence doit être créée");
         let req = &requirements[0];
-        assert_eq!(req.id, "REQ_DIR_2026_288_RENURE");
+        assert_eq!(req.handle.as_str(), "REQ_DIR_2026_288_RENURE");
         assert!(req
             .properties
             .get("description")
@@ -107,7 +109,7 @@ mod tests {
         let constraints = model.get_collection("transverse", "constraints");
         assert_eq!(constraints.len(), 1, "Une contrainte doit être créée");
         let cstr = &constraints[0];
-        assert_eq!(cstr.id, "CSTR_RENURE_LIMITS");
+        assert_eq!(cstr.handle.as_str(), "CSTR_RENURE_LIMITS");
 
         // On vérifie que la logique métier (170 + 80) a bien été appliquée
         assert_eq!(

@@ -61,7 +61,12 @@ impl SimpleRetriever {
 
         let mut context_str = String::from("### CONTEXTE DU PROJET (Données réelles) ###\n");
         for (kind, name, description) in found_elements {
-            context_str.push_str(&format!("- [{}] {} : {}\n", kind, name, description));
+            context_str.push_str(&format!(
+                "- [{}] {} : {}\n",
+                kind.join(", "),
+                name,
+                description
+            ));
         }
 
         tokenizers::truncate_tokens(&context_str, 2000)
@@ -71,31 +76,32 @@ impl SimpleRetriever {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::NameType;
     use crate::utils::prelude::*;
 
     // Helper pour créer un élément factice compatible Pure Graph
-    fn mock_el(name: &str) -> ArcadiaElement {
+    fn mock_el(name: &str) -> RaiseResult<ArcadiaElement> {
         let mut properties = UnorderedMap::new();
         properties.insert("description".to_string(), json_value!("desc"));
 
-        ArcadiaElement {
-            id: "uuid".to_string(),
-            name: NameType::String(name.to_string()),
-            kind: "test_type".to_string(),
+        Ok(ArcadiaElement {
+            handle: "uuid".try_into()?,
+            name: I18nString::Single(name.to_string()),
+            kind: vec!["test_type".to_string()],
             properties,
-        }
+            ..Default::default()
+        })
     }
 
     #[test]
-    fn test_retrieval_normalization() {
+    fn test_retrieval_normalization() -> RaiseResult<()> {
         let mut model = ProjectModel::default();
-        model.add_element("sa", "components", mock_el("Système Électrique"));
+        model.add_element("sa", "components", mock_el("Système Électrique")?);
 
         let retriever = SimpleRetriever::new(model);
         let result = retriever.retrieve_context("Je cherche le systeme electrique");
 
         assert!(result.contains("Système Électrique"));
+        Ok(())
     }
 
     #[test]
@@ -107,25 +113,26 @@ mod tests {
     }
 
     #[test]
-    fn test_get_root_element() {
+    fn test_get_root_element() -> RaiseResult<()> {
         let mut model = ProjectModel::default();
         let retriever_empty = SimpleRetriever::new(model.clone());
         assert!(retriever_empty.get_root_element().is_none());
 
-        model.add_element("sa", "components", mock_el("Composant Racine"));
+        model.add_element("sa", "components", mock_el("Composant Racine")?);
         let retriever_full = SimpleRetriever::new(model);
 
         let root = retriever_full.get_root_element();
         assert!(root.is_some());
         assert_eq!(root.unwrap().name.as_str(), "Composant Racine");
+        Ok(())
     }
 
     #[test]
-    fn test_retrieval_dynamic_elements() {
+    fn test_retrieval_dynamic_elements() -> RaiseResult<()> {
         let mut model = ProjectModel::default();
 
         // Ajout d'une exigence via l'API dynamique
-        let mut req = mock_el("Perf Constraint 10ms");
+        let mut req = mock_el("Perf Constraint 10ms")?;
         req.properties.insert(
             "description".to_string(),
             json_value!("Le système doit répondre en moins de 10ms"),
@@ -140,5 +147,6 @@ mod tests {
             res_req.contains("Perf Constraint"),
             "Nom d'exigence manquant"
         );
+        Ok(())
     }
 }

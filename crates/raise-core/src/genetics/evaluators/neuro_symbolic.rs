@@ -13,21 +13,33 @@ pub trait GnnResilienceScorer: Send + Sync {
     async fn predict_resilience(&self, genome: &SystemAllocationGenome) -> f32;
 }
 
+/// 🎯 Le Pont vers le Tribunal AST (Évaluation O(1))
+/// Stocke les matrices pré-compilées des attributs de sécurité et de physique
+/// pour éviter toute allocation mémoire dans la boucle génétique.
+pub struct FastTribunalRules {
+    pub component_clearances: Vec<f32>,
+    pub component_is_public: Vec<bool>,
+    // Autres attributs RAMI 4.0 pré-amorcés...
+}
+
 /// L'Évaluateur Neuro-Symbolique hybride.
 /// Combine les règles mathématiques strictes (Symbolique) et l'intuition du réseau de neurones (Neuro).
 pub struct NeuroSymbolicEvaluator {
     pub base_evaluator: ArchitectureEvaluator,
     pub gnn_scorer: SharedRef<dyn GnnResilienceScorer>,
+    pub tribunal_rules: Option<SharedRef<FastTribunalRules>>,
 }
 
 impl NeuroSymbolicEvaluator {
     pub fn new(
         base_evaluator: ArchitectureEvaluator,
         gnn_scorer: SharedRef<dyn GnnResilienceScorer>,
+        tribunal_rules: Option<SharedRef<FastTribunalRules>>,
     ) -> Self {
         Self {
             base_evaluator,
             gnn_scorer,
+            tribunal_rules,
         }
     }
 }
@@ -58,8 +70,29 @@ impl Evaluator<SystemAllocationGenome> for NeuroSymbolicEvaluator {
         (objs, violation)
     }
 
+    /// 🎯 LE COURT-CIRCUIT SYNCHRONE (Fail-Fast)
+    /// Rejette les mutations topologiques illégales avant même de calculer les scores.
     fn is_valid(&self, genome: &SystemAllocationGenome) -> bool {
-        self.base_evaluator.is_valid(genome)
+        // Validation de base (Taille du génome)
+        if !self.base_evaluator.is_valid(genome) {
+            return false;
+        }
+
+        // Exécution des règles du Tribunal AST pré-compilées
+        if let Some(rules) = &self.tribunal_rules {
+            for &comp_idx in &genome.genes {
+                if comp_idx < rules.component_clearances.len() {
+                    let clearance = rules.component_clearances[comp_idx];
+                    let is_public = rules.component_is_public[comp_idx];
+
+                    // Règle d'ingénierie absolue : Pas de composant critique exposé
+                    if clearance >= 3.0 && is_public {
+                        return false; // Destruction immédiate de l'individu
+                    }
+                }
+            }
+        }
+        true
     }
 }
 
@@ -117,7 +150,7 @@ mod tests {
         let base_eval = ArchitectureEvaluator::new(model);
         let gnn_mock = SharedRef::new(MockGnnScorer::new(mock_gnn_score));
 
-        let evaluator = NeuroSymbolicEvaluator::new(base_eval, gnn_mock);
+        let evaluator = NeuroSymbolicEvaluator::new(base_eval, gnn_mock, None);
 
         // Génome 1 (Valide) : F0 sur C0, F1 sur C1 -> Charge=10 par composant (< 15)
         let valid_genome = SystemAllocationGenome {
@@ -185,5 +218,37 @@ mod tests {
 
         assert_eq!(names.len(), 3);
         assert!(names[2].contains("Neural Resilience"));
+    }
+
+    #[test]
+    fn test_tribunal_short_circuit_is_valid() {
+        // Environnement minimal : 1 Fonction, 1 Composant
+        let model = ArchitectureCostModel::new(1, 1, &[], &[(0, 10.0)], &[(0, 15.0)]);
+        let base_eval = ArchitectureEvaluator::new(model);
+        let gnn_mock = SharedRef::new(MockGnnScorer::new(0.0));
+
+        // 🎯 CONFIGURATION DU TRIBUNAL :
+        // Le composant index 0 a une clearance de 4.0 (Critique) ET est exposé publiquement (true)
+        let rules = FastTribunalRules {
+            component_clearances: vec![4.0],
+            component_is_public: vec![true],
+        };
+
+        // Injection du Tribunal dans le NeuroSymbolicEvaluator
+        let evaluator =
+            NeuroSymbolicEvaluator::new(base_eval, gnn_mock, Some(SharedRef::new(rules)));
+
+        // Le génome décide d'allouer la fonction 0 sur le composant 0
+        let genome = SystemAllocationGenome {
+            genes: vec![0],
+            function_ids: vec![],
+            available_component_ids: vec![],
+        };
+
+        // 🎯 L'ASSERTION : Le "Fail-Fast" doit bloquer l'évaluation instantanément
+        assert!(
+            !evaluator.is_valid(&genome),
+            "Le Tribunal AST aurait dû détruire ce génome (Clearance >= 3.0 sur port public)."
+        );
     }
 }

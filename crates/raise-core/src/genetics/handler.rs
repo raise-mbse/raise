@@ -96,7 +96,7 @@ impl NodeHandler for GeneticsHandler {
         let gnn_state = SharedRef::new(GnnState::new());
         let gnn_adapter = SharedRef::new(GnnScorerAdapter::new(gnn_state));
 
-        let evaluator = NeuroSymbolicEvaluator::new(base_evaluator, gnn_adapter);
+        let evaluator = NeuroSymbolicEvaluator::new(base_evaluator, gnn_adapter, None);
 
         let genetic_config = GeneticConfig {
             population_size: 50,

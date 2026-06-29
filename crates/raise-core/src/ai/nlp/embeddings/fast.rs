@@ -2,11 +2,11 @@
 
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::utils::inference::embeddings::TextEmbedder;
-use crate::utils::prelude::*; // 🎯 Façade Unique // 🎯 Injection de NOTRE façade noyau
+use crate::utils::prelude::*;
 
 pub struct FastEmbedEngine {
     // 🎯 ZÉRO DETTE : On ne manipule plus la librairie tierce ici.
-    // On s'appuie exclusivement sur la forteresse que vous avez bâtie.
+    // On s'appuie exclusivement sur la forteresse bâtie.
     embedder: TextEmbedder,
 }
 

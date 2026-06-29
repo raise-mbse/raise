@@ -61,7 +61,7 @@ Ces opérations sont fondamentales pour traiter les données indépendamment de 
 
 - **Expansion** : Convertit toutes les clés en IRIs absolues.
 - _Entrée_ : `{"@type": "oa:OperationalActivity"}`
-- _Sortie_ : `{"@type": "https://raise.io/ontology/arcadia/oa#OperationalActivity"}`
+- _Sortie_ : `{"@type": "oa#OperationalActivity"}`
 - _Usage_ : Validation, typage fort, stockage RDF.
 
 - **Compaction** : Réduit les IRIs en préfixes courts pour la lisibilité.
@@ -91,7 +91,7 @@ let registry = VocabularyRegistry::new();
 
 // 2. Document entrant (format compact)
 let doc = json!({
-    "@context": { "oa": "[https://raise.io/ontology/arcadia/oa#](https://raise.io/ontology/arcadia/oa#)" },
+    "@context": { },
     "@id": "urn:uuid:1234",
     "@type": "oa:OperationalActivity",
     "oa:name": "Analyser le besoin"

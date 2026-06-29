@@ -1,0 +1,50 @@
+# Point d'entrée de la génération
+root ::= ws dapp_block ws
+
+# Définition d'une dApp racine
+dapp_block ::= "dapp" ws "\"" handle "\"" ws "{" ws dapp_body "}" ws
+
+# Corps de la dApp (peut inclure des métriques globales et des services)
+dapp_body ::= (attribute | pvmt_block | service_block)*
+
+# Définition d'un service (SystemComponent)
+service_block ::= "service" ws "\"" handle "\"" ws "{" ws service_body "}" ws
+
+# Corps du service (inclut les contraintes opérationnelles)
+service_body ::= (attribute | pvmt_block | runtime_block | resource_block | module_block)*
+
+# Définition d'un module (LogicalComponent)
+module_block ::= "module" ws "\"" handle "\"" ws "{" ws module_body "}" ws
+module_body ::= (attribute | pvmt_block)*
+
+# --- BLOCS DE CONTRAINTES (MBSE & World Model) ---
+
+# Propriétés de Valeur Transverse (Performance, Frugalité, Sécurité)
+pvmt_block ::= "pvmt" ws "{" ws (attribute)* "}" ws
+
+# Règles d'exécution au runtime (ex: timeout_ms, max_attempts)
+runtime_block ::= "runtime" ws "{" ws (attribute)* "}" ws
+
+# Contraintes de ressources matérielles (ex: max_memory_mb, priority)
+resource_block ::= "resources" ws "{" ws (attribute)* "}" ws
+
+# --- PRIMITIVES ET ATTRIBUTS ---
+
+# Un attribut clé-valeur (ex: max_memory_mb = 1024)
+attribute ::= ident ws "=" ws value ws
+
+# Règle d'or : Isolation des identifiants (uniquement des handles sémantiques)
+handle ::= [a-z0-9_]+
+
+# Identifiant d'une propriété 
+ident ::= [a-z_]+
+
+# Valeurs possibles : chaîne, nombre, ou booléen
+value ::= string_val | number_val | boolean_val
+
+string_val ::= "\"" [a-zA-Z0-9_\- ]+ "\""
+number_val ::= [0-9]+
+boolean_val ::= "true" | "false"
+
+# Gestion silencieuse des espaces et retours à la ligne
+ws ::= [ \t\n\r]*

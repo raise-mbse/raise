@@ -141,60 +141,45 @@ impl AiOrchestrator {
 
         // 3. World Model (Neuro-Symbolique) avec AUTO-HEALING (Zéro Dette)
         let world_engine = match NeuroSymbolicEngine::bootstrap(manager).await {
-            Ok(engine) => {
-                // 🎯 FAIL-FAST (Zéro Dette) : On refuse catégoriquement de démarrer
-                if engine.config.embedding_dim != 32 {
-                    crate::raise_error!(
-                        "ERR_OBSOLETE_BRAIN",
-                        error = format!(
-                            "Incohérence dimensionnelle fatale : {} détectée, 32 attendue.",
-                            engine.config.embedding_dim
-                        ),
-                        context = json_value!({
-                            "action": "HALT",
-                            "hint": "L'auto-guérison est désactivée. Vous devez purger manuellement l'ancienne configuration dans 'service_configs' et supprimer le fichier 'world_model.safetensors'."
-                        })
-                    )
-                }
-                engine // Retourner l'engine si la dimension est correcte
+            Ok(engine) if engine.config.embedding_dim == 36 => engine, // Cas parfait
+            Ok(obsolete_engine) => {
+                // 🎯 AUTO-GUÉRISON : Le modèle existant est d'une ancienne version
+                crate::user_warn!(
+                    "WRN_OBSOLETE_BRAIN_DETECTED",
+                    json_value!({
+                        "detected_dim": obsolete_engine.config.embedding_dim,
+                        "expected_dim": 36,
+                        "action": "AUTO_HEALING",
+                        "hint": "Le modèle existant est obsolète. Purge et réinitialisation de l'espace latent à 36 dimensions."
+                    })
+                );
+
+                let active_device = AppConfig::device();
+                let wm_config = WorldModelConfig {
+                    vocab_size: 1000,
+                    embedding_dim: 36,
+                    action_dim: 5,
+                    hidden_dim: 64,
+                    use_gpu: active_device.is_cuda() || active_device.is_metal(),
+                };
+
+                // On force la création d'un nouveau modèle vierge et sain
+                NeuroSymbolicEngine::new_empty(wm_config)?
             }
             Err(e) => {
+                // 🎯 AUTO-GUÉRISON : Aucun modèle trouvé ou erreur de lecture
                 crate::user_warn!(
                     "WRN_WORLD_MODEL_LOAD_FAILED",
                     json_value!({ "error": e.to_string(), "hint": "Démarrage avec un modèle vierge." })
                 );
+
                 let active_device = AppConfig::device();
-                let is_gpu = active_device.is_cuda() || active_device.is_metal();
-                // Récupération de la config mockée/locale avec sécurisation
-                let wm_config = match AppConfig::get_runtime_settings(
-                    manager,
-                    "ref:components:handle:ai_world_model",
-                )
-                .await
-                {
-                    Ok(settings) => {
-                        // 🎯 FIX CLIPPY : unwrap_or au lieu de unwrap_or_else
-                        let mut cfg: WorldModelConfig = json::deserialize_from_value(settings)
-                            .unwrap_or(WorldModelConfig {
-                                vocab_size: 1000,
-                                embedding_dim: 32,
-                                action_dim: 5,
-                                hidden_dim: 64,
-                                use_gpu: is_gpu,
-                            });
-                        // 🎯 AUTO-HEALING : On écrase la config de test obsolète
-                        if cfg.embedding_dim != 32 {
-                            cfg.embedding_dim = 32;
-                        }
-                        cfg
-                    }
-                    Err(_) => WorldModelConfig {
-                        vocab_size: 1000,
-                        embedding_dim: 32,
-                        action_dim: 5,
-                        hidden_dim: 64,
-                        use_gpu: is_gpu,
-                    },
+                let wm_config = WorldModelConfig {
+                    vocab_size: 1000,
+                    embedding_dim: 36,
+                    action_dim: 5,
+                    hidden_dim: 64,
+                    use_gpu: active_device.is_cuda() || active_device.is_metal(),
                 };
 
                 NeuroSymbolicEngine::new_empty(wm_config)?
@@ -354,6 +339,112 @@ impl AiOrchestrator {
         Ok(loss)
     }
 
+    /// Orchestre la génération déterministe d'une architecture via le méta-langage (DSL).
+    pub async fn generate_architecture(&mut self, query: &str) -> RaiseResult<usize> {
+        user_info!("INF_ARCH_GEN_START", json_value!({"query": query}));
+
+        // 1. FAIL-FAST : Extraction sécurisée du moteur local avant toute opération I/O
+        let mut local_llm_guard = match &self.llm_native {
+        Some(shared_llm) => shared_llm.lock().await,
+        None => raise_error!(
+            "ERR_NATIVE_LLM_REQUIRED", 
+            error = "La génération d'architecture nécessite le moteur local Air-Gap pour la garantie GBNF."
+        ),
+    };
+
+        // 2. Le Prompt Système (Gabarit Déterministe)
+        // 2. Le Prompt Système (Gabarit Déterministe avec Few-Shot Example)
+        let system_prompt = "You are the Intent Translator for the R.A.I.S.E. MBSE System. \
+        Translate the user's request into the strictly formatted DSL. \
+        RULES: \
+        1. NO conversational text. Output ONLY the DSL code block. \
+        2. TOPOLOGICAL ISOLATION: Use ONLY logical 'handles' (lowercase, numbers, underscores), NEVER UUIDs. \
+        3. Strict Syntax: You MUST separate the block keyword and the handle with a space, and the handle MUST be in double quotes.\n\
+        \n\
+        EXAMPLE FORMAT:\n\
+        dapp \"my_app\" {\n\
+            type = \"daemon\"\n\
+            pvmt {\n\
+                frugality_score = 9\n\
+            }\n\
+            service \"my_service\" {\n\
+                runtime {\n\
+                    timeout_ms = 5000\n\
+                }\n\
+                module \"my_module\" {\n\
+                    visibility = \"public\"\n\
+                }\n\
+            }\n\
+        }";
+
+        // 3. Chargement de la Grammaire GBNF depuis les assets
+        let app_config = AppConfig::get();
+        let grammar_path = match app_config.get_path("PATH_RAISE_GRAMMARS") {
+            Some(p) => p,
+            None => PathBuf::from("crates/raise-core/src/model_engine/dsl/grammar.gbnf"),
+        };
+
+        let grammar_str = match fs::read_to_string_async(&grammar_path).await {
+            Ok(g) => g,
+            Err(e) => raise_error!("ERR_GRAMMAR_LOAD_FAILED", error = e.to_string()),
+        };
+
+        // 4. Inférence sous contrainte (Isolation "Air-Gap" via Native Engine)
+        let generated_dsl = match local_llm_guard
+            .generate_with_grammar(system_prompt, query, 1024, &grammar_str)
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => raise_error!("ERR_ARCH_GENERATION_FAILED", error = e.to_string()),
+        };
+
+        user_info!(
+            "INF_ARCH_GEN_SUCCESS",
+            json_value!({"length": generated_dsl.len()})
+        );
+
+        // 5. Parsing et Transformation
+        use crate::model_engine::dsl::mapper::DslToArcadiaMapper;
+        use crate::model_engine::dsl::parser::parse_dsl_text;
+
+        let parsed_ast = match parse_dsl_text(&generated_dsl) {
+            Ok(ast) => ast,
+            Err(e) => raise_error!("ERR_DSL_AST_PARSING", error = e.to_string()),
+        };
+
+        let file_pair = match parsed_ast.into_iter().next() {
+            Some(p) => p,
+            None => raise_error!("ERR_DSL_AST_EMPTY", error = "L'AST généré est vide."),
+        };
+
+        let manager = CollectionsManager::new(
+            self.storage.as_ref(),
+            &app_config.mount_points.modeling.domain,
+            &app_config.mount_points.modeling.db,
+        );
+
+        let mapper = DslToArcadiaMapper::new();
+        let staging_model = match mapper.transform(file_pair, &manager).await {
+            Ok(m) => m,
+            Err(e) => raise_error!("ERR_DSL_TRANSFORMATION", error = e.to_string()),
+        };
+
+        // 6. Ingestion dans le Jumeau Numérique
+        use crate::model_engine::ingestion::ModelIngestionService;
+        let inserted_count =
+            match ModelIngestionService::persist_model(&staging_model, &manager).await {
+                Ok(c) => c,
+                Err(e) => raise_error!("ERR_DSL_PERSISTENCE", error = e.to_string()),
+            };
+
+        user_success!(
+            "SUC_ARCH_PERSISTED",
+            json_value!({"elements_created": inserted_count})
+        );
+
+        Ok(inserted_count)
+    }
+
     pub async fn learn_document(&mut self, content: &str, source: &str) -> RaiseResult<usize> {
         let app_config = AppConfig::get();
         let storage_arc = self.storage.clone();
@@ -391,7 +482,7 @@ impl AiOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::NameType;
+    use crate::model_engine::types::SlugString;
     use crate::utils::testing::*;
 
     fn get_hf_lock() -> &'static AsyncMutex<()> {
@@ -399,13 +490,14 @@ mod tests {
         LOCK.get_or_init(|| AsyncMutex::new(()))
     }
 
-    fn make_element(id: &str) -> ArcadiaElement {
-        ArcadiaElement {
-            id: id.to_string(),
-            name: NameType::default(),
-            kind: "https://raise.io/ontology/arcadia/la#LogicalFunction".to_string(),
+    fn make_element(id: &str) -> RaiseResult<ArcadiaElement> {
+        Ok(ArcadiaElement {
+            handle: SlugString::new(id)?,
+            name: I18nString::default(),
+            kind: vec!["la:LogicalFunction".to_string()],
             properties: UnorderedMap::new(),
-        }
+            ..Default::default()
+        })
     }
 
     #[async_test]
@@ -434,8 +526,11 @@ mod tests {
         assert!(res > 0);
 
         // 3. TEST DU WORLD MODEL (Apprentissage Renforcé)
+
+        let before = make_element("1")?;
+        let after = make_element("2")?;
         let loss = orch
-            .reinforce_learning(&make_element("1"), CommandType::Create, &make_element("2"))
+            .reinforce_learning(&before, CommandType::Create, &after)
             .await?;
         assert!(loss >= 0.0);
 
@@ -477,5 +572,36 @@ mod tests {
         assert!(orch.world_engine.config.vocab_size > 0);
 
         Ok(())
+    }
+    #[async_test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
+    async fn test_orchestrator_generate_architecture_missing_llm() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let config = AppConfig::get();
+        let manager = CollectionsManager::new(
+            &sandbox.db,
+            &config.mount_points.system.domain,
+            &config.mount_points.system.db,
+        );
+
+        // Instanciation de l'orchestrateur SANS LLM natif (llm_native = None)
+        let mut orch =
+            AiOrchestrator::new(ProjectModel::default(), &manager, sandbox.db.clone(), None)
+                .await?;
+
+        // La génération d'architecture doit échouer brutalement car le moteur Air-Gap est requis
+        let result = orch.generate_architecture("Crée un service").await;
+
+        match result {
+            Err(AppError::Structured(err)) => {
+                assert_eq!(
+                    err.code, "ERR_NATIVE_LLM_REQUIRED",
+                    "Doit exiger le LLM local pour le GBNF."
+                );
+                Ok(())
+            }
+            _ => panic!("Le système aurait dû lever ERR_NATIVE_LLM_REQUIRED"),
+        }
     }
 }

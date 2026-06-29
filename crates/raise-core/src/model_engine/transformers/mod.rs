@@ -61,11 +61,11 @@ impl ModelTransformer for UniversalTransformer {
         {
             for link in links {
                 if let Some(id) = link.get("id").and_then(|v| v.as_str()) {
-                    if let Some(found) = targets.iter().find(|t| t.id == id) {
+                    if let Some(found) = targets.iter().find(|t| t.handle.as_str() == id) {
                         related_data.push(json_value!({
                             "name": found.name.as_str(),
                             "kind": found.kind,
-                            "id": found.id
+                            "id":found.handle.as_str().to_string()
                         }));
                     }
                 }
@@ -118,10 +118,9 @@ pub fn get_transformer(domain: TransformationDomain) -> Box<dyn ModelTransformer
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::NameType;
 
     #[test]
-    fn test_universal_transformer_logic() {
+    fn test_universal_transformer_logic() -> RaiseResult<()> {
         let mut model = ProjectModel::default();
         let config = TransformerConfig {
             domain: "test".into(),
@@ -133,15 +132,15 @@ mod tests {
 
         // Ajout d'une cible
         let target = ArcadiaElement {
-            id: "T1".into(),
-            name: NameType::String("Target".into()),
+            handle: "T1".try_into()?,
+            name: I18nString::Single("Target".into()),
             ..Default::default()
         };
         model.add_element("layer1", "col1", target);
 
         // Élément source avec lien
         let mut source = ArcadiaElement {
-            id: "S1".into(),
+            handle: "S1".try_into()?,
             ..Default::default()
         };
         source
@@ -151,5 +150,6 @@ mod tests {
         let result = transformer.transform_with_context(&source, &model).unwrap();
         assert_eq!(result["domain"], "test");
         assert_eq!(result["entity"]["relations"][0]["name"], "Target");
+        Ok(())
     }
 }

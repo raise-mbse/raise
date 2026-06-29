@@ -1,0 +1,44 @@
+// FICHIER : crates/raise-core/src/model_engine/dsl/grammar.pest
+
+// Règles silencieuses (ignorées dans l'AST final)
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+// Identifiants et Valeurs
+// handle_val force une chaîne entre guillemets sans tirets (bloque les UUIDs)
+handle_val  = @{ "\"" ~ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "_")* ~ "\"" }
+ident       = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+
+string_val  = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+number_val  = @{ ASCII_DIGIT+ }
+boolean_val = { "true" | "false" }
+value       = { boolean_val | number_val | string_val }
+
+// Attribut clé-valeur
+attribute = { ident ~ "=" ~ value }
+
+// ==========================================
+// BLOCS DE CONTRAINTES (MBSE 2.0 & World Model)
+// ==========================================
+pvmt_block     = { "pvmt" ~ "{" ~ attribute* ~ "}" }
+runtime_block  = { "runtime" ~ "{" ~ attribute* ~ "}" }
+resource_block = { "resources" ~ "{" ~ attribute* ~ "}" }
+
+// ==========================================
+// BLOCS STRUCTURELS (Architecture)
+// ==========================================
+// L'utilisation du tiret bas `_` rend le nœud parent silencieux dans l'AST,
+// on n'extrait que son contenu utile.
+
+module_body  = _{ (attribute | pvmt_block)* }
+module_block = { "module" ~ handle_val ~ "{" ~ module_body ~ "}" }
+
+service_body  = _{ (attribute | pvmt_block | runtime_block | resource_block | module_block)* }
+service_block = { "service" ~ handle_val ~ "{" ~ service_body ~ "}" }
+
+dapp_body  = _{ (attribute | pvmt_block | service_block)* }
+dapp_block = { "dapp" ~ handle_val ~ "{" ~ dapp_body ~ "}" }
+
+// ==========================================
+// POINT D'ENTRÉE
+// ==========================================
+file = { SOI ~ dapp_block ~ EOI }

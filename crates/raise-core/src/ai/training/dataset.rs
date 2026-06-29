@@ -1,7 +1,7 @@
 // FICHIER : src-tauri/src/ai/training/dataset.rs
 
 use crate::json_db::collections::manager::CollectionsManager;
-use crate::model_engine::types::ArcadiaElement;
+use crate::model_engine::types::{ArcadiaElement, SlugString};
 use crate::utils::prelude::*; // 🎯 Façade Unique
 
 /// Fournit un flux continu de paires (État_t, État_t+1) pour le World Model.
@@ -35,16 +35,11 @@ impl<'a> ArcadiaBatchIterator<'a> {
                     let mut batch = Vec::with_capacity(self.batch_size);
                     for doc in docs.into_iter().take(self.batch_size) {
                         let element = ArcadiaElement {
-                            id: doc
-                                .get("handle")
-                                .or_else(|| doc.get("_id"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            name: crate::model_engine::types::NameType::default(),
-                            kind: "https://raise.io/ontology/arcadia/pa#PhysicalComponent"
-                                .to_string(),
+                            handle: SlugString::from_json(doc.get("handle"), "unknown"),
+                            name: I18nString::default(),
+                            kind: vec!["pa:PhysicalComponent".to_string()],
                             properties: UnorderedMap::new(),
+                            ..Default::default()
                         };
                         batch.push(element);
                     }

@@ -1,17 +1,17 @@
 // FICHIER : crates/raise-core/src/code_generator/generators/constraint_validator.rs
 
 use crate::model_engine::types::ArcadiaElement;
-use crate::raise_error;
-use crate::utils::core::error::RaiseResult;
-use crate::utils::data::json::json_value;
-
+//use crate::raise_error;
+//use crate::utils::core::error::RaiseResult;
+//use crate::utils::data::json::json_value;
 pub struct ConstraintValidatorGenerator;
+use crate::utils::prelude::*;
 
 impl ConstraintValidatorGenerator {
     /// Génère un module Rust de validation à partir d'une contrainte réglementaire Arcadia.
     pub fn generate_rust_validator(constraint: &ArcadiaElement) -> RaiseResult<String> {
         // 1. Validation sémantique stricte
-        if !constraint.kind.contains("Constraint") {
+        if !constraint.kind.iter().any(|k| k.contains("Constraint")) {
             raise_error!(
                 "ERR_CODEGEN_INVALID_KIND",
                 error = "L'élément source doit être une Contrainte (Constraint) pour générer un validateur.",
@@ -85,7 +85,7 @@ pub fn validate_renure_compliance(sample: &FertilizerSample) -> RaiseResult<()> 
 }}
 "#,
             constraint_name = constraint_name,
-            id = constraint.id,
+            id = constraint.handle.as_str(),
             max_n = max_n,
             max_cu = max_cu,
             max_zn = max_zn
@@ -101,7 +101,6 @@ pub fn validate_renure_compliance(sample: &FertilizerSample) -> RaiseResult<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::NameType;
     use crate::utils::data::UnorderedMap;
 
     #[test]
@@ -112,10 +111,11 @@ mod tests {
         props.insert("max_zn_mg_kg".to_string(), json_value!(800));
 
         let mock_constraint = ArcadiaElement {
-            id: "CSTR_RENURE_LIMITS".to_string(),
-            name: NameType::String("Seuils de Tolérance RENURE".to_string()),
-            kind: "https://raise.io/transverse#Constraint".to_string(),
+            handle: "CSTR_RENURE_LIMITS".try_into()?,
+            name: I18nString::Single("Seuils de Tolérance RENURE".to_string()),
+            kind: vec!["transverse:Constraint".to_string()],
             properties: props,
+            ..Default::default()
         };
 
         let source_code = ConstraintValidatorGenerator::generate_rust_validator(&mock_constraint)?;

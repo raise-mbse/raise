@@ -46,7 +46,7 @@ Vérifie comment les **Fonctions Système (SA)** sont réalisées par les **Comp
 - `Covered` : La fonction est allouée à au moins un composant.
 - `Uncovered` : La fonction est orpheline (Dette technique).
 
-- **Gestion des Noms** : Supporte les types de noms complexes (`NameType::String`, `NameType::I18n`).
+- **Gestion des Noms** : Supporte les types de noms complexes (`I18nString::Single`, `I18nString::I18n`).
 
 **Exemple de sortie (CSV) :**
 

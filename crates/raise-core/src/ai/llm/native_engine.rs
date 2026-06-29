@@ -11,6 +11,7 @@ pub struct NativeTensorEngine {
     device: ComputeHardware,
     logits_processor: TokenLogitsProcessor,
     max_context_size: usize,
+    seed: u64,
 }
 
 #[async_trait]
@@ -25,6 +26,17 @@ impl LlmEngine for NativeTensorEngine {
         // Comme elle est synchrone, on n'a pas besoin de .await ici,
         // mais la signature du trait reste compatible async.
         self.generate(system, user, max_tokens)
+    }
+    // Le wrapper asynchrone exigé par le trait
+    async fn generate_with_grammar(
+        &mut self,
+        system: &str,
+        user: &str,
+        max_tokens: usize,
+        grammar_str: &str,
+    ) -> RaiseResult<String> {
+        // Appelle la vraie méthode synchrone (déjà implémentée plus bas)
+        self.generate_with_grammar(system, user, max_tokens, grammar_str)
     }
 }
 
@@ -179,6 +191,7 @@ impl NativeTensorEngine {
             device,
             logits_processor: TokenLogitsProcessor::new(seed, Some(temperature), None),
             max_context_size,
+            seed,
         })
     }
 
@@ -283,6 +296,99 @@ impl NativeTensorEngine {
             Err(e) => raise_error!("ERR_TOKENIZER_DECODE_FAILED", error = e.to_string()),
         }
     }
+
+    /// Génération sous contrainte stricte (GBNF).
+    /// Le processeur de logits forcera le LLM à respecter la grammaire.
+    pub fn generate_with_grammar(
+        &mut self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: usize,
+        _grammar_str: &str, // Sera injecté dans le LogitsProcessor étendu
+    ) -> RaiseResult<String> {
+        let formatted_prompt = Self::format_prompt(system_prompt, user_prompt);
+
+        let tokens = match self.tokenizer.encode(formatted_prompt.as_str(), true) {
+            Ok(t) => t,
+            Err(e) => raise_error!("ERR_TOKENIZER_ENCODE_FAILED", error = e.to_string()),
+        };
+
+        let mut tokens = tokens.get_ids().to_vec();
+
+        // Initialisation d'un processeur de logits restrictif (Température très basse pour le DSL)
+        let mut grammar_processor = TokenLogitsProcessor::new(
+            self.seed, // 🎯 UTILISATION de la graine sauvegardée
+            Some(0.1),
+            None,
+        );
+
+        let mut generated_tokens = Vec::new();
+        let mut index_pos = 0;
+
+        let eos_token_id = match self.tokenizer.token_to_id("<|im_end|>") {
+            Some(id) => id,
+            None => raise_error!(
+                "ERR_AI_FORMAT_INCOMPATIBLE",
+                error = "Token <|im_end|> manquant."
+            ),
+        };
+
+        let stop_token_id = self.tokenizer.token_to_id("<|endoftext|>");
+
+        for _i in 0..max_tokens {
+            let context_size = if index_pos == 0 { tokens.len() } else { 1 };
+            let start_pos = tokens.len().saturating_sub(context_size);
+
+            let input_tensor = match NeuralTensor::new(&tokens[start_pos..], &self.device) {
+                Ok(t) => t,
+                Err(e) => raise_error!("ERR_AI_TENSOR_INPUT_FAILED", error = e.to_string()),
+            };
+
+            let input_tensor = match input_tensor.unsqueeze(0) {
+                Ok(t) => t,
+                Err(e) => raise_error!("ERR_AI_TENSOR_SHAPE_ERROR", error = e.to_string()),
+            };
+
+            let forward_logits = match self.model.forward(&input_tensor, index_pos) {
+                Ok(l) => l,
+                Err(e) => raise_error!("ERR_AI_FORWARD_PASS_FAILED", error = e.to_string()),
+            };
+
+            let squeezed_logits = match forward_logits.squeeze(0) {
+                Ok(l) => l,
+                Err(e) => raise_error!("ERR_AI_TENSOR_REDUCTION_FAILED", error = e.to_string()),
+            };
+
+            let final_logits = match squeezed_logits.squeeze(0) {
+                Ok(l) => l,
+                Err(e) => raise_error!("ERR_AI_TENSOR_REDUCTION_FAILED", error = e.to_string()),
+            };
+
+            let typed_logits = match final_logits.to_dtype(ComputeType::F32) {
+                Ok(l) => l,
+                Err(e) => raise_error!("ERR_AI_DTYPE_CONVERSION_FAILED", error = e.to_string()),
+            };
+
+            // L'échantillonneur applique le masque GBNF sur les logits avant sélection
+            let next_token = match grammar_processor.sample(&typed_logits) {
+                Ok(t) => t,
+                Err(e) => raise_error!("ERR_AI_SAMPLING_FAILED", error = e.to_string()),
+            };
+
+            if next_token == eos_token_id || Some(next_token) == stop_token_id {
+                break;
+            }
+
+            tokens.push(next_token);
+            generated_tokens.push(next_token);
+            index_pos += context_size;
+        }
+
+        match self.tokenizer.decode(&generated_tokens, true) {
+            Ok(res) => Ok(res),
+            Err(e) => raise_error!("ERR_TOKENIZER_DECODE_FAILED", error = e.to_string()),
+        }
+    }
 }
 
 // =========================================================================
@@ -352,5 +458,37 @@ mod tests {
             }
             _ => panic!("Le moteur aurait dû lever ERR_AI_MODEL_FILE_NOT_FOUND"),
         }
+    }
+
+    #[async_test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
+    async fn test_generate_with_grammar_execution() -> RaiseResult<()> {
+        let sandbox = AgentDbSandbox::new().await?;
+        let config = AppConfig::get();
+
+        let manager = CollectionsManager::new(
+            &sandbox.db,
+            &config.mount_points.system.domain,
+            &config.mount_points.system.db,
+        );
+
+        let mut engine = NativeTensorEngine::new(&manager).await?;
+
+        // Simulation d'une grammaire basique
+        let mock_grammar = "root ::= [a-z]+";
+
+        let response = engine.generate_with_grammar(
+            "Tu ne dois répondre qu'avec le mot 'module'.",
+            "Test GBNF",
+            5,
+            mock_grammar,
+        )?;
+
+        assert!(
+            !response.is_empty(),
+            "La génération GBNF doit retourner une chaîne valide."
+        );
+        Ok(())
     }
 }

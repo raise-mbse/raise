@@ -21,7 +21,7 @@ impl DynamicValidator {
     /// 🎯 PURE GRAPH : On aplatit l'élément et ses propriétés dynamiques
     fn build_context(element: &ArcadiaElement) -> JsonValue {
         let mut context = json_value!({
-            "_id": element.id,
+            "_id": element.handle.as_str().to_string(),
             "name": element.name.as_str(),
             "kind": element.kind
         });
@@ -51,18 +51,17 @@ impl ModelValidator for DynamicValidator {
             // 🎯 GARDE D'INTÉGRITÉ : On extrait l'UUID. Si la règle n'est pas persistée (None), on l'ignore.
             if let Some(technical_uuid) = &rule._id {
                 // Une règle s'applique si la cible est "all" ou si le type (URI) contient la cible
-                if rule.target == "all" || element.kind.contains(&rule.target) {
+                if rule.target == "all" || element.kind.iter().any(|k| k.contains(&rule.target)) {
                     // Évaluation de l'expression de la règle via le Rules Engine
                     if let Ok(result) = Evaluator::evaluate(&rule.expr, &context, loader).await {
                         // Si l'expression retourne 'false', une issue est créée
                         if result.as_bool() == Some(false) {
                             issues.push(ValidationIssue {
                                 severity: Severity::Warning,
-                                rule_id: technical_uuid.clone(), // ✅ On utilise l'UUID garanti par le 'if let'
-                                element_id: element.id.clone(),
+                                rule_id: technical_uuid.clone(),
+                                element_id: element.handle.as_str().to_string(),
                                 message: rule.description.clone().unwrap_or_else(|| {
                                     format!("Violation de la règle dynamique : {}", rule.handle)
-                                    // ✅ On utilise 'handle'
                                 }),
                             });
                         }
@@ -123,7 +122,7 @@ mod tests {
         let mut props_ok = UnorderedMap::new();
         props_ok.insert("mass".into(), json_value!(100));
         let el_ok = ArcadiaElement {
-            id: "1".into(),
+            handle: "1".try_into()?,
             properties: props_ok,
             ..Default::default()
         };
@@ -135,7 +134,7 @@ mod tests {
         let mut props_ko = UnorderedMap::new();
         props_ko.insert("mass".into(), json_value!(1000));
         let el_ko = ArcadiaElement {
-            id: "2".into(),
+            handle: "2".try_into()?,
             properties: props_ko,
             ..Default::default()
         };
@@ -167,7 +166,7 @@ mod tests {
 
         // Element qui matche le type
         let el_match = ArcadiaElement {
-            kind: "https://raise.io/la#LogicalFunction".into(),
+            kind: vec!["la:LogicalFunction".into()],
             ..Default::default()
         };
         assert_eq!(
@@ -177,7 +176,7 @@ mod tests {
 
         // Element qui ne matche pas
         let el_no_match = ArcadiaElement {
-            kind: "https://raise.io/sa#SystemComponent".into(),
+            kind: vec!["sa:SystemComponent".into()],
             ..Default::default()
         };
         assert_eq!(

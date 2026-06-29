@@ -1,25 +1,28 @@
 // FICHIER : src-tauri/src/ai/context/tests.rs
 
 use crate::ai::context::retriever::SimpleRetriever;
-use crate::model_engine::types::{ArcadiaElement, NameType, ProjectModel};
+use crate::model_engine::types::{ArcadiaElement, ProjectModel};
 use crate::utils::prelude::*;
 
 /// Helper pour créer un élément factice compatible avec l'architecture Pure Graph
-fn mock_element(name: &str, desc: &str) -> ArcadiaElement {
+fn mock_element(name: &str, desc: &str) -> RaiseResult<ArcadiaElement> {
     // 🎯 FIX : La description est maintenant une propriété dynamique
     let mut props = UnorderedMap::new();
     props.insert("description".to_string(), json_value!(desc));
 
-    ArcadiaElement {
-        id: format!("uuid-{}", name.replace(' ', "_")),
-        name: NameType::String(name.to_string()),
-        kind: "https://raise.io/ontology/arcadia/mock#Type".to_string(),
+    Ok(ArcadiaElement {
+        handle: format!("uuid-{}", name.replace(' ', "_"))
+            .as_str()
+            .try_into()?,
+        name: I18nString::Single(name.to_string()),
+        kind: vec!["mock:Type".to_string()],
         properties: props,
-    }
+        ..Default::default()
+    })
 }
 
 #[test]
-fn test_retriever_finds_relevant_info() {
+fn test_retriever_finds_relevant_info() -> RaiseResult<()> {
     // 1. Préparer un modèle "Pure Graph"
     let mut model = ProjectModel::default();
 
@@ -27,13 +30,13 @@ fn test_retriever_finds_relevant_info() {
     model.add_element(
         "oa",
         "actors",
-        mock_element("Pilote de Drone", "Responsable du vol et de la sécurité."),
+        mock_element("Pilote de Drone", "Responsable du vol et de la sécurité.")?,
     );
 
     model.add_element(
         "sa",
         "functions",
-        mock_element("Alimenter Secteur", "Fournit l'énergie au système."),
+        mock_element("Alimenter Secteur", "Fournit l'énergie au système.")?,
     );
 
     // 2. Instancier le retriever
@@ -52,6 +55,7 @@ fn test_retriever_finds_relevant_info() {
         context.contains("Responsable du vol"),
         "Le contexte doit contenir la description extraite des properties"
     );
+    Ok(())
 }
 
 #[test]

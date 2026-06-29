@@ -9,7 +9,7 @@ use crate::ai::llm::NativeLlmState;
 
 // Imports World Model
 use crate::ai::nlp::parser::CommandType;
-use crate::model_engine::types::{ArcadiaElement, NameType};
+use crate::model_engine::types::ArcadiaElement;
 
 // Imports GNN Arcadia
 use crate::ai::deep_learning::models::gnn_model::ArcadiaGnnModel;
@@ -201,7 +201,7 @@ pub async fn ai_learn_text(
 pub async fn ai_confirm_learning(
     ai_state: &AiState,
     action_intent: &str, // 🎯 OPTIMISATION : &str
-    entity_name: String, // Laissé en String car consommé par NameType::String
+    entity_name: String, // Laissé en String car consommé par I18nString::Single
     entity_kind: String, // Laissé en String car consommé par kind
 ) -> RaiseResult<String> {
     let guard = ai_state.0.lock().await;
@@ -226,20 +226,22 @@ pub async fn ai_confirm_learning(
 
     let props_before = UnorderedMap::new();
     let state_before = ArcadiaElement {
-        id: "root".to_string(),
-        name: NameType::String("Context".to_string()),
-        kind: "Context".to_string(),
+        handle: "root".try_into()?,
+        name: I18nString::Single("Context".to_string()),
+        kind: vec!["Context".to_string()],
         properties: props_before,
+        ..Default::default()
     };
 
     let mut props_after = UnorderedMap::new();
     props_after.insert("description".to_string(), json_value!("Feedback"));
 
     let state_after = ArcadiaElement {
-        id: "new".to_string(),
-        name: NameType::String(entity_name),
-        kind: entity_kind,
+        handle: "new".try_into()?,
+        name: I18nString::Single(entity_name),
+        kind: vec![entity_kind],
         properties: props_after,
+        ..Default::default()
     };
 
     match orchestrator

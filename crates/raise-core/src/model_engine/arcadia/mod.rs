@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/model_engine/arcadia/mod.rs
+// FICHIER : crates/raise-core/src/model_engine/arcadia/mod.rs
 
 use crate::json_db::jsonld::VocabularyRegistry;
 
@@ -23,7 +23,6 @@ pub struct ArcadiaOntology;
 
 impl ArcadiaOntology {
     /// Récupère l'URI complète d'un type via le registre dynamique.
-    /// Exemple: ("oa", "OperationalActor") -> "https://raise.io/ontology/arcadia/oa#OperationalActor"
     pub fn get_uri(layer_prefix: &str, type_name: &str) -> Option<String> {
         let reg = VocabularyRegistry::global().ok()?;
         let default_ctx = reg.get_default_context();

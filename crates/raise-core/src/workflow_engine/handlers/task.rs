@@ -343,6 +343,10 @@ mod tests {
             .upsert_document("agents", mock_agent("ref:agents:handle:agent_system"))
             .await?;
 
+        manager
+            .upsert_document("agents", mock_agent("ref:agents:handle:agent_dispatcher"))
+            .await?;
+
         // 🎯 FIX 3 : Un seul upsert de squad avec 'status' en minuscules ("active")
         manager
             .upsert_document(

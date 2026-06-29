@@ -3,8 +3,8 @@
 use super::{HandlerContext, NodeHandler};
 use crate::ai::nlp::parser::CommandType;
 use crate::ai::world_model::engine::WorldAction;
-use crate::model_engine::types::{ArcadiaElement, NameType};
-use crate::utils::prelude::*; // 🎯 Façade Unique RAISE
+use crate::model_engine::types::ArcadiaElement;
+use crate::utils::prelude::*;
 use crate::workflow_engine::{ExecutionStatus, NodeType, WorkflowNode};
 
 pub struct WorldModelHandler;
@@ -91,10 +91,11 @@ impl NodeHandler for WorldModelHandler {
         }
 
         let arcadia_element = ArcadiaElement {
-            id: element_id.to_string(),
-            name: NameType::String(name),
-            kind,
+            handle: element_id.try_into()?,
+            name: I18nString::Single(name),
+            kind: vec![kind],
             properties,
+            ..Default::default()
         };
 
         // 3. Délégation du calcul tensoriel au Thread CPU
@@ -191,7 +192,7 @@ mod tests {
                 &json_value!({
                     "_id": "comp_abc",
                     "name": "Radar",
-                    "type": "https://raise.io/ontology/arcadia/pa#PhysicalComponent"
+                    "type": "pa:PhysicalComponent"
                 }),
             )
             .await?;

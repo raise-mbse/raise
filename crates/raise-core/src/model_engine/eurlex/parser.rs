@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/model_engine/eurlex/parser.rs
+// FICHIER : crates/raise-core/src/model_engine/eurlex/parser.rs
 
 use crate::utils::prelude::*;
 use quick_xml::events::Event;

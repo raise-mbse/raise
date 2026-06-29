@@ -1,9 +1,9 @@
-// FICHIER : src-tauri/src/model_engine/loader.rs
+// FICHIER : crates/raise-core/src/model_engine/loader.rs
 
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::jsonld::JsonLdProcessor;
 use crate::json_db::storage::StorageEngine;
-use crate::model_engine::types::{ArcadiaElement, NameType, ProjectMeta, ProjectModel};
+use crate::model_engine::types::{ArcadiaElement, ProjectMeta, ProjectModel};
 use crate::rules_engine::evaluator::DataProvider;
 use crate::utils::prelude::*; // 🎯 Façade Unique RAISE
 
@@ -168,7 +168,7 @@ impl<'a> ModelLoader<'a> {
         doc: JsonValue,
         layer_hint: Option<&str>,
     ) -> RaiseResult<ArcadiaElement> {
-        let id = doc
+        let handle = doc
             .get("_id")
             .or(doc.get("id"))
             .and_then(|v| v.as_str())
@@ -189,9 +189,9 @@ impl<'a> ModelLoader<'a> {
         let kind = if let Some(layer) = layer_hint {
             let mut local_proc = self.processor.clone();
             let _ = local_proc.load_layer_context(layer);
-            local_proc.context_manager().expand_term(raw_type)
+            vec![local_proc.context_manager().expand_term(raw_type)]
         } else {
-            raw_type.to_string()
+            vec![raw_type.to_string()]
         };
 
         let mut properties = UnorderedMap::new();
@@ -207,10 +207,11 @@ impl<'a> ModelLoader<'a> {
         }
 
         Ok(ArcadiaElement {
-            id,
-            name: NameType::String(name_val.to_string()),
+            handle: handle.as_str().try_into()?,
+            name: I18nString::Single(name_val.to_string()),
             kind,
             properties,
+            ..Default::default()
         })
     }
 
@@ -275,7 +276,7 @@ mod tests {
 
         let element = loader.json_to_element(doc, None)?;
 
-        assert_eq!(element.id, "el_1");
+        assert_eq!(element.handle.as_str(), "el_1");
         assert_eq!(element.name.as_str(), "Moteur");
         assert_eq!(
             element.properties.get("mass").and_then(|v| v.as_i64()),

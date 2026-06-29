@@ -29,6 +29,14 @@ pub trait LlmEngine: Send + Sync {
         user: &str,
         max_tokens: usize,
     ) -> RaiseResult<String>;
+
+    async fn generate_with_grammar(
+        &mut self,
+        system: &str,
+        user: &str,
+        max_tokens: usize,
+        grammar_str: &str,
+    ) -> RaiseResult<String>;
 }
 
 #[derive(Clone)]

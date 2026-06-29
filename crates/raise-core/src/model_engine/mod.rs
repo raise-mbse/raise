@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/model_engine/mod.rs
+// FICHIER : crates/raise-core/src/model_engine/mod.rs
 
 // 1. Modules Fondamentaux (Le cœur du moteur)
 pub mod ingestion;
@@ -8,18 +8,18 @@ pub mod types;
 // 2. Modules de Logique Métier (Les fonctionnalités)
 pub mod arcadia; // Définitions sémantiques (OA, SA, LA, PA)
 pub mod capella; // Support des fichiers .capella / .aird
+pub mod dsl;
 pub mod eurlex;
 pub mod sysml2;
 pub mod transformers; // Génération de code et conversion
 pub mod validators; // Vérification de cohérence // Conformité
-
-// 3. Re-exports (Façade publique pour le reste de l'app)
+                    // 3. Re-exports (Façade publique pour le reste de l'app)
 
 // Loader & Modèle
 pub use loader::ModelLoader;
 // 🎯 PURE GRAPH : Suppression de TransverseModel
 pub use ingestion::ModelIngestionService;
-pub use types::{ArcadiaElement, NameType, ProjectMeta, ProjectModel};
+pub use types::{ArcadiaElement, ProjectMeta, ProjectModel};
 
 // Transformers (Software, Hardware, System)
 pub use transformers::{
@@ -47,15 +47,15 @@ mod tests {
     use crate::utils::prelude::*;
 
     #[test]
-    fn test_integration_facade() {
+    fn test_integration_facade() -> RaiseResult<()> {
         // 1. Vérifie l'accès aux types de base
         let mut model = ProjectModel::default();
 
         // 🎯 PURE GRAPH : Utilisation des méthodes dynamiques pour le test
         let req = ArcadiaElement {
-            id: "REQ-1".to_string(),
-            name: NameType::String("Test".to_string()),
-            kind: "Requirement".to_string(),
+            handle: "REQ-1".try_into()?,
+            name: I18nString::Single("Test".to_string()),
+            kind: vec!["Requirement".to_string()],
             ..Default::default()
         };
         model.add_element("transverse", "requirements", req);
@@ -69,5 +69,6 @@ mod tests {
         // 3. Vérifie l'accès à l'enum Sémantique
         let layer = Layer::SystemAnalysis;
         assert_eq!(layer, Layer::SystemAnalysis);
+        Ok(())
     }
 }

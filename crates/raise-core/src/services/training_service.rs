@@ -6,7 +6,7 @@ use crate::ai::orchestrator::AiOrchestrator;
 use crate::ai::training::ai_train_domain_native;
 use crate::json_db::collections::manager::CollectionsManager;
 use crate::json_db::storage::StorageEngine;
-use crate::model_engine::types::{ArcadiaElement, NameType, ProjectModel};
+use crate::model_engine::types::{ArcadiaElement, ProjectModel};
 use crate::utils::prelude::*;
 
 /// Lance l'entraînement de l'adaptateur LoRA pour le GNN sur un domaine donné.
@@ -47,17 +47,19 @@ pub async fn train_world_model(
 
     // 2. Préparation du scénario d'apprentissage (Transition LA -> PA)
     let state_before = ArcadiaElement {
-        id: "comp_logic_1".into(),
-        name: NameType::default(),
-        kind: "https://raise.io/ontology/arcadia/la#LogicalComponent".into(),
+        handle: "comp_logic_1".try_into()?,
+        name: I18nString::default(),
+        kind: vec!["la:LogicalComponent".into()],
         properties: UnorderedMap::new(),
+        ..Default::default()
     };
 
     let state_after = ArcadiaElement {
-        id: "comp_phys_1".into(),
-        name: NameType::default(),
-        kind: "https://raise.io/ontology/arcadia/pa#PhysicalComponent".into(),
+        handle: "comp_phys_1".try_into()?,
+        name: I18nString::default(),
+        kind: vec!["pa:PhysicalComponent".into()],
         properties: UnorderedMap::new(),
+        ..Default::default()
     };
 
     // 3. Boucle d'entraînement

@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/model_engine/capella/diagram_generator.rs
+// FICHIER : crates/raise-core/src/model_engine/capella/diagram_generator.rs
 
 use crate::utils::prelude::*;
 

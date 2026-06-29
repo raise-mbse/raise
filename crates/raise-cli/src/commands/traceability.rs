@@ -38,7 +38,7 @@ fn get_docs(model: &ProjectModel) -> UnorderedMap<String, JsonValue> {
     // Itération dynamique sur l'ensemble du graphe via all_elements()
     for e in model.all_elements() {
         if let Ok(val) = json::serialize_to_value(e) {
-            docs.insert(e.id.clone(), val);
+            docs.insert(e.handle.as_str().to_string(), val);
         }
     }
     docs

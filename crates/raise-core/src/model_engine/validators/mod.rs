@@ -57,7 +57,6 @@ pub trait ModelValidator: Send + Sync {
 mod tests {
     use super::*;
     use crate::json_db::storage::{JsonDbConfig, StorageEngine};
-    use crate::model_engine::types::NameType;
 
     // Mock d'un validateur simple pour tester le trait
     struct MockValidator;
@@ -73,7 +72,7 @@ mod tests {
                 Ok(vec![ValidationIssue {
                     severity: Severity::Error,
                     rule_id: "MOCK_RULE".to_string(),
-                    element_id: element.id.clone(),
+                    element_id: element.handle.as_str().to_string(),
                     message: "Invalid name".to_string(),
                 }])
             } else {
@@ -100,10 +99,11 @@ mod tests {
 
         // 2. Création élément
         let el = ArcadiaElement {
-            id: "1".to_string(),
-            name: NameType::String("Invalid".to_string()),
-            kind: "Test".to_string(),
+            handle: "1".try_into()?,
+            name: I18nString::Single("Invalid".to_string()),
+            kind: vec!["Test".to_string()],
             properties: UnorderedMap::new(),
+            ..Default::default()
         };
 
         // 3. Validation

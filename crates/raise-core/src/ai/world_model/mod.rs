@@ -5,6 +5,7 @@ pub mod engine;
 pub mod perception;
 pub mod representation;
 pub mod training;
+pub mod validation;
 
 pub use engine::{NeuroSymbolicEngine, WorldAction};
 pub use training::WorldTrainer;

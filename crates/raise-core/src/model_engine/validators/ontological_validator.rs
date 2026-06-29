@@ -17,19 +17,21 @@ impl OntologicalValidator {
     /// Logique de validation pilotée par les données (Data-Driven)
     pub fn check_semantics(&self, element: &ArcadiaElement) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
-        let kind = element.kind.as_str();
+        // 🎯 FIX V2 : On vérifie chaque type déclaré
+        for k in &element.kind {
+            let kind_str = k.as_str();
 
-        // "Unknown" est toléré temporairement en cours de modélisation (SysML incomplet)
-        if kind != "Unknown" && !ArcadiaOntology::is_known_type(kind) {
-            issues.push(ValidationIssue {
-                rule_id: "ONTO-001".to_string(),
-                severity: Severity::Warning,
-                element_id: element.id.clone(),
-                message: format!(
-                    "Sémantique inconnue ou non-mappée dans l'ontologie : '{}'",
-                    kind
-                ),
-            });
+            if kind_str != "Unknown" && !ArcadiaOntology::is_known_type(kind_str) {
+                issues.push(ValidationIssue {
+                    rule_id: "ONTO-001".to_string(),
+                    severity: Severity::Warning,
+                    element_id: element.handle.as_str().to_string(),
+                    message: format!(
+                        "Sémantique inconnue ou non-mappée dans l'ontologie : '{}'",
+                        kind_str
+                    ),
+                });
+            }
         }
 
         issues
@@ -50,7 +52,6 @@ impl ModelValidator for OntologicalValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::NameType;
 
     #[test]
     fn test_ontological_validation() -> RaiseResult<()> {
@@ -59,9 +60,9 @@ mod tests {
         // 🎯 On teste avec l'état "Unknown" (Brouillon en cours de modélisation)
         // C'est la règle métier qui permet de contourner le registre strict.
         let valid_draft = ArcadiaElement {
-            id: "draft-001".to_string(),
-            name: NameType::String("Brouillon".to_string()),
-            kind: "Unknown".to_string(),
+            handle: "draft-001".try_into()?,
+            name: I18nString::Single("Brouillon".to_string()),
+            kind: vec!["Unknown".to_string()], // 🎯 FIX
             ..Default::default()
         };
 
@@ -74,9 +75,9 @@ mod tests {
 
         // 🎯 On teste avec un type inventé (qui sera rejeté par le mock vide)
         let invalid_element = ArcadiaElement {
-            id: "err-001".to_string(),
-            name: NameType::String("Erreur Magique".to_string()),
-            kind: "MagicalEntity".to_string(),
+            handle: "err-001".try_into()?,
+            name: I18nString::Single("Erreur Magique".to_string()),
+            kind: vec!["MagicalEntity".to_string()], // 🎯 FIX
             ..Default::default()
         };
 

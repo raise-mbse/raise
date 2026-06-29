@@ -88,9 +88,25 @@ impl ComplianceChecker for EuAiActChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::utils::testing::mock::DbSandbox;
 
-    #[test]
-    fn test_eu_ai_act_risk_classification() -> RaiseResult<()> {
+    // Helper centralisé
+    async fn init_test_env() -> RaiseResult<DbSandbox> {
+        let sandbox = DbSandbox::new().await?;
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+        VocabularyRegistry::init_from_db(&mgr).await?;
+        Ok(sandbox)
+    }
+
+    #[async_test]
+    async fn test_eu_ai_act_risk_classification() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new();
 
         // 1. IA Conforme (Risque défini)
@@ -144,8 +160,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_eu_ai_act_ignore_non_ai() -> RaiseResult<()> {
+    #[async_test]
+    async fn test_eu_ai_act_ignore_non_ai() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
         let mut docs: UnorderedMap<String, JsonValue> = UnorderedMap::new();
         docs.insert(
             "hardware_v1".to_string(),

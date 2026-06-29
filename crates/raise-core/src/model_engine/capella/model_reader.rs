@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/src/model_engine/capella/model_reader.rs
+// FICHIER : crates/raise-core/src/model_engine/capella/model_reader.rs
 
 use super::xmi_parser::CapellaXmiParser;
 use crate::model_engine::types::{ProjectMeta, ProjectModel};
@@ -47,32 +47,33 @@ impl CapellaReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::{ArcadiaElement, NameType};
+    use crate::model_engine::types::ArcadiaElement;
 
     /// Helper pour créer un élément factice compatible Pure Graph
-    fn create_dummy(id: &str, kind: &str) -> ArcadiaElement {
-        ArcadiaElement {
-            id: id.into(),
-            name: NameType::default(),
-            kind: kind.into(),
+    fn create_dummy(id: &str, kind: &str) -> RaiseResult<ArcadiaElement> {
+        Ok(ArcadiaElement {
+            handle: id.try_into()?,
+            name: I18nString::default(),
+            kind: vec![kind.into()],
             // 🎯 FIX : Pas de champ description statique, tout est dans properties
             properties: UnorderedMap::new(),
-        }
+            ..Default::default()
+        })
     }
 
     #[test]
-    fn test_element_counting_logic() {
+    fn test_element_counting_logic() -> RaiseResult<()> {
         let mut model = ProjectModel::default();
 
         // Ajout d'éléments dans diverses couches via l'API dynamique
-        model.add_element("sa", "functions", create_dummy("F1", "SystemFunction"));
-        model.add_element("la", "components", create_dummy("C1", "LogicalComponent"));
+        model.add_element("sa", "functions", create_dummy("F1", "SystemFunction")?);
+        model.add_element("la", "components", create_dummy("C1", "LogicalComponent")?);
 
         // Ajout dans la couche Transverse
         model.add_element(
             "transverse",
             "requirements",
-            create_dummy("R1", "Requirement"),
+            create_dummy("R1", "Requirement")?,
         );
 
         // Vérification du comptage universel
@@ -81,11 +82,13 @@ mod tests {
             count, 3,
             "Le compteur doit inclure toutes les couches dynamiques"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_empty_model_metadata() {
+    fn test_empty_model_metadata() -> RaiseResult<()> {
         let model = ProjectModel::default();
         assert_eq!(CapellaReader::count_elements(&model), 0);
+        Ok(())
     }
 }

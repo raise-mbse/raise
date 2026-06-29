@@ -21,7 +21,7 @@ impl ConsistencyChecker {
         let name = element.name.as_str();
 
         // 1. Vérification de l'ID technique
-        if element.id.trim().is_empty() {
+        if element.handle.as_str().trim().is_empty() {
             issues.push(ValidationIssue {
                 severity: Severity::Error,
                 rule_id: "SYS_001".to_string(),
@@ -35,7 +35,7 @@ impl ConsistencyChecker {
             issues.push(ValidationIssue {
                 severity: Severity::Warning,
                 rule_id: "SYS_002".to_string(),
-                element_id: element.id.clone(),
+                element_id: element.handle.as_str().to_string(),
                 message: "L'élément n'a pas de nom descriptif.".to_string(),
             });
         }
@@ -49,10 +49,10 @@ impl ConsistencyChecker {
                         issues.push(ValidationIssue {
                             severity: Severity::Error,
                             rule_id: "SEM_001".to_string(),
-                            element_id: element.id.clone(),
+                            element_id: element.handle.as_str().to_string(),
                             message: format!(
                                 "Violation de domaine : '{}' ne peut pas s'appliquer à un '{}' (Attendu: {}).",
-                                prop_def.label, element.kind, domain_iri
+                                prop_def.label, element.kind.join(", "), domain_iri // 🎯 FIX format
                             ),
                         });
                     }
@@ -63,7 +63,7 @@ impl ConsistencyChecker {
                     json_value!({
                         "error": format!("Propriété inconnue : {}", prop_key),
                         "property_key": prop_key,
-                        "element_id": element.id,
+                        "element_id": element.handle.as_str().to_string(),
                         "action": "check_local_logic"
                     })
                 );
@@ -103,10 +103,10 @@ impl ConsistencyChecker {
                                         issues.push(ValidationIssue {
                                             severity: Severity::Warning,
                                             rule_id: "SEM_002".to_string(),
-                                            element_id: element.id.clone(),
+                                            element_id: element.handle.as_str().to_string(),
                                             message: format!(
                                                 "Relation invalide : La cible '{}' est de type '{}', attendu '{}' pour la propriété '{}'.",
-                                                target_el.name.as_str(), target_el.kind, range_iri, prop_def.label
+                                                target_el.name.as_str(), target_el.kind.join(", "), range_iri, prop_def.label // 🎯 FIX format
                                             ),
                                         });
                                     }
@@ -167,7 +167,6 @@ impl ModelValidator for ConsistencyChecker {
 mod tests {
     use super::*;
     use crate::json_db::collections::manager::CollectionsManager;
-    use crate::model_engine::types::NameType;
     use crate::utils::testing::{AgentDbSandbox, DbSandbox};
 
     async fn inject_mock_mapping(manager: &CollectionsManager<'_>) -> RaiseResult<()> {
@@ -195,9 +194,9 @@ mod tests {
         crate::utils::testing::mock::inject_mock_config().await;
         let checker = ConsistencyChecker::new();
         let el = ArcadiaElement {
-            id: "UUID-OK".to_string(),
-            name: NameType::String("ValidName".to_string()),
-            kind: "https://raise.io/ontology/arcadia/la#LogicalComponent".to_string(),
+            handle: "UUID-OK".try_into()?,
+            name: I18nString::Single("ValidName".to_string()),
+            kind: vec!["la:LogicalComponent".to_string()],
             ..Default::default()
         };
         let issues = checker.check_local_logic(&el)?;

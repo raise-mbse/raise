@@ -2,6 +2,19 @@
 
 **Rationalized Advanced Intelligence System Engine.** *Sovereign Infrastructure and "Local-First" Architecture for Critical Engineering.*
 
+
+---
+
+### 📢 Project Status: v0 [Archive / Conception Phase Complete]
+
+> [!NOTE]
+> **Completion of Initial Conception Phase (v0):** This repository marks the culmination of six months of R&D focused on the RAISE core infrastructure and its foundational cognitive block.
+> * **Repository Status:** This repository is now archived as the historical "Open Core" foundation and is maintained in read-only mode for reference.
+> * **v1 Transition:** Active development has transitioned to a new dedicated repository for v1. All future features and roadmap updates will be managed there.
+> * **Intellectual Property:** In accordance with our licensing model, only the generated framework code is open-source. SysML schemas, internal databases, and specialized cognitive blocks remain proprietary intellectual property.
+ 
+
+
 ---
 
 > [!IMPORTANT]  

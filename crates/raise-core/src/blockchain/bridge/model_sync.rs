@@ -63,7 +63,10 @@ impl<'a> ModelSync<'a> {
         let mut found = false;
         for collections in model.layers.values_mut() {
             for vec in collections.values_mut() {
-                if let Some(pos) = vec.iter().position(|e| e.id == element.id) {
+                if let Some(pos) = vec
+                    .iter()
+                    .position(|e| e.handle.as_str() == element.handle.as_str())
+                {
                     vec[pos] = element.clone();
                     found = true;
                     break;
@@ -87,7 +90,7 @@ impl<'a> ModelSync<'a> {
     fn delete_element(&self, model: &mut ProjectModel, id: &str) -> RaiseResult<()> {
         for collections in model.layers.values_mut() {
             for vec in collections.values_mut() {
-                if let Some(pos) = vec.iter().position(|e| e.id == id) {
+                if let Some(pos) = vec.iter().position(|e| e.handle.as_str() == id) {
                     vec.remove(pos);
                     return Ok(());
                 }
@@ -103,20 +106,20 @@ impl<'a> ModelSync<'a> {
     }
 
     /// Helper pour router les nouveaux éléments vers les couches par défaut.
-    fn map_kind_to_location(&self, kind: &str) -> (&'static str, &'static str) {
-        if kind.contains("OperationalActor") {
+    fn map_kind_to_location(&self, kinds: &[String]) -> (&'static str, &'static str) {
+        if kinds.iter().any(|k| k.contains("OperationalActor")) {
             ("oa", "actors")
-        } else if kind.contains("OperationalActivity") {
+        } else if kinds.iter().any(|k| k.contains("OperationalActivity")) {
             ("oa", "activities")
-        } else if kind.contains("SystemComponent") {
+        } else if kinds.iter().any(|k| k.contains("SystemComponent")) {
             ("sa", "components")
-        } else if kind.contains("SystemFunction") {
+        } else if kinds.iter().any(|k| k.contains("SystemFunction")) {
             ("sa", "functions")
-        } else if kind.contains("LogicalComponent") {
+        } else if kinds.iter().any(|k| k.contains("LogicalComponent")) {
             ("la", "components")
-        } else if kind.contains("PhysicalComponent") {
+        } else if kinds.iter().any(|k| k.contains("PhysicalComponent")) {
             ("pa", "components")
-        } else if kind.contains("Requirement") {
+        } else if kinds.iter().any(|k| k.contains("Requirement")) {
             ("transverse", "requirements")
         } else {
             ("others", "elements")
@@ -143,7 +146,7 @@ mod tests {
     }
 
     #[async_test]
-    async fn test_upsert_new_element_pure_graph() {
+    async fn test_upsert_new_element_pure_graph() -> RaiseResult<()> {
         let state = create_test_state();
         let sync = ModelSync::new(&state);
 
@@ -157,9 +160,10 @@ mod tests {
             obj.insert("id".to_string(), json_value!("urn:sa:comp1"));
             obj.insert("@id".to_string(), json_value!("urn:sa:comp1"));
 
-            obj.insert("kind".to_string(), json_value!("SystemComponent"));
-            obj.insert("@type".to_string(), json_value!("SystemComponent"));
-            obj.insert("type".to_string(), json_value!("SystemComponent"));
+            // 🎯 FIX V2 : Sérialisation d'un vecteur JSON au lieu d'une String
+            obj.insert("kind".to_string(), json_value!(["SystemComponent"]));
+            obj.insert("@type".to_string(), json_value!(["SystemComponent"]));
+            obj.insert("type".to_string(), json_value!(["SystemComponent"]));
 
             obj.insert("name".to_string(), json_value!("Radar Unit"));
         }
@@ -183,24 +187,17 @@ mod tests {
             "L'élément n'a pas été routé dans la bonne couche (sa/components)"
         );
         assert_eq!(components[0].name.as_str(), "Radar Unit");
+        Ok(())
     }
 
     #[async_test]
-    async fn test_delete_element_pure_graph() {
+    async fn test_delete_element_pure_graph() -> RaiseResult<()> {
         let state = create_test_state();
         let sync = ModelSync::new(&state);
 
-        let default_element = ArcadiaElement::default();
-        let mut payload = json::serialize_to_value(&default_element).unwrap();
-
-        // 🎯 FIX ALIASING : Même sécurité pour l'injection directe en RAM
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("id".to_string(), json_value!("urn:la:ecu"));
-            obj.insert("@id".to_string(), json_value!("urn:la:ecu"));
-            obj.insert("kind".to_string(), json_value!("LogicalComponent"));
-            obj.insert("@type".to_string(), json_value!("LogicalComponent"));
-        }
-        let element: ArcadiaElement = json::deserialize_from_value(payload).unwrap();
+        // 🎯 FIX : On crée un élément avec le handle correspondant à l'ID de suppression
+        let mut element = ArcadiaElement::default();
+        element.handle = "urn:la:ecu".try_into()?;
 
         let mut model = state.model.lock().await;
         model.add_element("la", "components", element);
@@ -223,10 +220,11 @@ mod tests {
             model.get_collection("la", "components").is_empty(),
             "L'élément n'a pas été supprimé"
         );
+        Ok(())
     }
 
     #[async_test]
-    async fn test_delete_idempotence_pure_graph() {
+    async fn test_delete_idempotence_pure_graph() -> RaiseResult<()> {
         let state = create_test_state();
         let sync = ModelSync::new(&state);
 
@@ -242,10 +240,11 @@ mod tests {
             result.is_ok(),
             "La suppression d'un fantôme doit être idempotente et réussir silencieusement."
         );
+        Ok(())
     }
 
     #[async_test]
-    async fn test_invalid_payload_rejection() {
+    async fn test_invalid_payload_rejection() -> RaiseResult<()> {
         let state = create_test_state();
         let sync = ModelSync::new(&state);
 
@@ -265,5 +264,6 @@ mod tests {
         if let Err(e) = result {
             assert!(e.to_string().contains("ERR_SYNC_PAYLOAD_INVALID"));
         }
+        Ok(())
     }
 }

@@ -169,9 +169,9 @@ mod tests {
             obj.insert("id".to_string(), json_value!("urn:sa:radar-01"));
             obj.insert("@id".to_string(), json_value!("urn:sa:radar-01"));
 
-            obj.insert("kind".to_string(), json_value!("SystemComponent"));
-            obj.insert("@type".to_string(), json_value!("SystemComponent"));
-            obj.insert("type".to_string(), json_value!("SystemComponent"));
+            obj.insert("kind".to_string(), json_value!(["SystemComponent"]));
+            obj.insert("@type".to_string(), json_value!(["SystemComponent"]));
+            obj.insert("type".to_string(), json_value!(["SystemComponent"]));
 
             obj.insert("name".to_string(), json_value!("Radar System"));
         }

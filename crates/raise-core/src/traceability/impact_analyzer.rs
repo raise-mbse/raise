@@ -76,45 +76,68 @@ impl ImpactAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_engine::types::{ArcadiaElement, NameType, ProjectModel};
+    use crate::json_db::collections::manager::CollectionsManager;
+    use crate::json_db::jsonld::VocabularyRegistry;
+    use crate::model_engine::types::{ArcadiaElement, ProjectModel};
+    use crate::utils::testing::mock::DbSandbox;
 
-    #[test]
-    fn test_impact_propagation_pure_graph() -> RaiseResult<()> {
+    async fn init_test_env() -> RaiseResult<DbSandbox> {
+        let sandbox = DbSandbox::new().await?;
+        let mgr = CollectionsManager::new(
+            &sandbox.storage,
+            &sandbox.config.mount_points.system.domain,
+            &sandbox.config.mount_points.system.db,
+        );
+        VocabularyRegistry::init_from_db(&mgr).await?;
+        Ok(sandbox)
+    }
+
+    #[async_test]
+    async fn test_impact_propagation_pure_graph() -> RaiseResult<()> {
+        let _sandbox = init_test_env().await?;
+
         let mut model = ProjectModel::default();
-        let mut p1 = UnorderedMap::new();
-        p1.insert("allocatedTo".into(), json_value!("B"));
 
-        // 🎯 FIX : Utilisation de 'add_element' au lieu de model.sa.functions.push
+        // 1. A doit posséder la propriété "allocatedTo" pointant vers B
+        let mut p_a = UnorderedMap::new();
+        p_a.insert("allocatedTo".into(), json_value!("B"));
+
         model.add_element(
             "sa",
             "functions",
             ArcadiaElement {
-                id: "A".into(),
-                name: NameType::String("A".into()),
-                kind: "SystemFunction".into(),
-                properties: p1,
+                handle: "A".try_into()?,
+                kind: vec!["SystemFunction".into()],
+                properties: p_a, // La relation est ICI
+                ..Default::default()
             },
         );
 
+        // 2. B n'a pas besoin de propriétés pour être une cible
         model.add_element(
             "sa",
             "functions",
             ArcadiaElement {
-                id: "B".into(),
-                name: NameType::String("B".into()),
-                kind: "SystemFunction".into(),
-                properties: Default::default(),
+                handle: "B".try_into()?,
+                kind: vec!["SystemFunction".into()],
+                ..Default::default()
             },
         );
 
         let tracer = Tracer::from_legacy_model(&model)?;
-        let analyzer = ImpactAnalyzer::new(tracer);
 
-        let report = analyzer.analyze("B", 1)?;
+        // 🎯 Vérification : A doit maintenant être vu comme parent de B
+        assert!(
+            !tracer.get_downstream_ids("A").is_empty(),
+            "A doit avoir des éléments en aval"
+        );
+
+        let analyzer = ImpactAnalyzer::new(tracer);
+        let report = analyzer.analyze("A", 1)?;
 
         assert!(
-            report.impacted_elements.iter().any(|e| e.element_id == "A"),
-            "L'impact n'a pas été propagé de B vers A."
+            report.impacted_elements.iter().any(|e| e.element_id == "B"),
+            "L'impact n'a pas été propagé de A vers B."
         );
 
         Ok(())

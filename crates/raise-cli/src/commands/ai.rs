@@ -1,4 +1,4 @@
-// FICHIER : src-tauri/tools/raise-cli/src/commands/ai.rs
+// FICHIER : crates/raise-cli/src/commands/ai.rs
 
 use clap::{Args, Subcommand};
 use raise_core::{user_error, user_info, user_success, utils::prelude::*};
@@ -90,6 +90,13 @@ pub enum AiCommands {
         /// 🎯 Ingestion automatique dans la base de données cible
         #[arg(short, long)]
         ingest: bool,
+    },
+
+    /// 🏗️ Générer une architecture MBSE contrainte (via méta-langage GBNF)
+    #[command(visible_alias = "g")]
+    Generate {
+        /// L'intention architecturale (ex: "Je veux un service backend d'authentification...")
+        prompt: String,
     },
 
     /// 🔎 Expliquer une décision de l'IA (XAI)
@@ -490,6 +497,32 @@ pub async fn handle(args: AiArgs, ctx: CliContext) -> RaiseResult<()> {
                     }
                 }
                 Err(e) => raise_error!("ERR_AI_EXECUTION_FAILED", error = e.to_string()),
+            }
+        }
+
+        AiCommands::Generate { prompt } => {
+            user_info!("AI_GENERATE_INIT", json_value!({"prompt": &prompt}));
+            println!("⏳ Conception de l'architecture en cours (Moteur Déterministe GBNF)...");
+
+            let mut orch = orch_ref.lock().await;
+
+            match orch.generate_architecture(&prompt).await {
+                Ok(count) => {
+                    user_success!(
+                        "AI_GENERATE_SUCCESS",
+                        json_value!({"elements_created": count})
+                    );
+                    println!("\n✅ Architecture générée avec succès !");
+                    println!(
+                        "📦 {} éléments ont été instanciés et isolés dans le Jumeau Numérique.",
+                        count
+                    );
+                }
+                Err(e) => raise_error!(
+                    "ERR_AI_GENERATE_FAILED",
+                    error = e.to_string(),
+                    context = json_value!({"prompt": prompt})
+                ),
             }
         }
 
@@ -917,6 +950,48 @@ mod tests {
                 "ERR_TEST_ASSERTION_FAILED",
                 error = "Le handler aurait dû rejeter l'appel car l'orchestrateur est absent."
             ),
+        }
+    }
+    #[async_test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "cuda"), ignore)]
+    async fn test_ai_generate_parsing() -> RaiseResult<()> {
+        mock::inject_mock_config().await;
+
+        // 1. Test de la commande complète
+        let cli = match TestCli::try_parse_from(vec![
+            "test",
+            "generate",
+            "Crée un service de base de données local",
+        ]) {
+            Ok(c) => c,
+            Err(e) => raise_error!("ERR_TEST_PARSE", error = e.to_string()),
+        };
+
+        if let Some(AiCommands::Generate { prompt }) = cli.args.command {
+            assert_eq!(prompt, "Crée un service de base de données local");
+        } else {
+            raise_error!(
+                "ERR_TEST_ASSERTION_FAILED",
+                error = "Échec du parsing de la commande 'generate'"
+            );
+        }
+
+        // 2. Test de l'alias 'g'
+        let cli_alias = match TestCli::try_parse_from(vec!["test", "g", "service authentification"])
+        {
+            Ok(c) => c,
+            Err(e) => raise_error!("ERR_TEST_PARSE", error = e.to_string()),
+        };
+
+        if let Some(AiCommands::Generate { prompt }) = cli_alias.args.command {
+            assert_eq!(prompt, "service authentification");
+            Ok(())
+        } else {
+            raise_error!(
+                "ERR_TEST_ASSERTION_FAILED",
+                error = "Échec du parsing de l'alias 'g'"
+            )
         }
     }
 }
